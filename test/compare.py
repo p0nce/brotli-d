@@ -9,12 +9,10 @@ Requires: pip install brotli
 import os, sys, random, struct, subprocess, tempfile, glob
 import brotli
 
-TESTER = sys.argv[1]
-REPO = sys.argv[2]
-SEED = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-FUZZ = int(sys.argv[4]) if len(sys.argv) > 4 else 20000
+TESTER = None
+REPO = None
 LIMIT = 64 * 1024 * 1024
-rng = random.Random(SEED)
+rng = random.Random(1)
 
 def fnv1a(d):
     h = 0xcbf29ce484222325
@@ -141,6 +139,11 @@ def mutate(x):
     return bytes(x)
 
 def main():
+    global TESTER, REPO
+    TESTER = sys.argv[1]
+    REPO = sys.argv[2]
+    rng.seed(int(sys.argv[3]) if len(sys.argv) > 3 else 1)
+    FUZZ = int(sys.argv[4]) if len(sys.argv) > 4 else 20000
     total_bad = 0
 
     # 1. Official test vectors.
@@ -176,4 +179,5 @@ def main():
     print('TOTAL MISMATCHES:', total_bad)
     sys.exit(1 if total_bad else 0)
 
-main()
+if __name__ == "__main__":
+    main()

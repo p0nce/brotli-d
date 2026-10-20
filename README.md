@@ -39,18 +39,19 @@ by trailing bytes), `outputTooSmall`, `outOfMemory`.
 
 - No streaming API: the whole input must be in memory, and the whole output too.
 - Large-window Brotli (non-RFC extension) and shared dictionaries are not supported.
-- Speed is ~75-165 MB/s (LDC, depends on data), about 2x slower than the reference
-  decoder: this one aims to be small.
+- Speed is about the same as the reference C decoder with LDC (~200-340 MB/s on text
+  and source code), slightly faster with `-boundscheck=off`. DMD is ~35% slower.
 
 ## Testing
 
 ```
-pip install brotli
-git clone https://github.com/google/brotli
 dmd -of=tester -I<numem>/source test/tester.d source/brotli.d <numem>/source/numem/core/hooks.d
-python test/compare.py ./tester ./brotli [seed] [fuzz iterations]
-python test/large.py ./tester
+./tester check test/suite.bin test/suite.txt
 ```
+
+`test/suite.*` holds ~18000 streams (valid and corrupted) with the reference
+decoder's results. `test/make_suite.py`, `test/compare.py` and `test/bench.py`
+regenerate it, fuzz, and benchmark against the reference (`pip install brotli`).
 
 ## License
 

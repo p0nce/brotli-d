@@ -79,6 +79,34 @@ int main(string[] args)
         }
         return 0;
     }
+    if (args.length >= 4 && args[1] == "check")
+    {
+        import std.string : splitLines;
+        auto data = cast(ubyte[]) read(args[2]);
+        string[] expected = (cast(string) read(args[3])).splitLines;
+        size_t p = 0, i = 0, bad = 0;
+        while (p < data.length)
+        {
+            uint n = data[p] | (data[p + 1] << 8) | (data[p + 2] << 16) | (data[p + 3] << 24);
+            p += 4;
+            string got = decodeAndCheck(data[p .. p + n]);
+            if (i >= expected.length || got != expected[i])
+            {
+                writefln("MISMATCH record %s: got \"%s\", expected \"%s\"", i, got,
+                         i < expected.length ? expected[i] : "nothing");
+                bad++;
+            }
+            p += n;
+            i++;
+        }
+        if (i != expected.length)
+        {
+            writefln("record count %s, expected %s", i, expected.length);
+            bad++;
+        }
+        writefln("%s records, %s mismatches", i, bad);
+        return bad ? 1 : 0;
+    }
     if (args.length >= 4 && args[1] == "bench")
     {
         auto input = cast(ubyte[]) read(args[2]);
@@ -97,6 +125,6 @@ int main(string[] args)
         writefln("%.1f MB/s", decoded.length * cast(double) iters / secs / 1e6);
         return 0;
     }
-    stderr.writeln("usage: tester batch <in> <out> | tester bench <file> <iters>");
+    stderr.writeln("usage: tester batch <in> <out> | tester check <suite.bin> <suite.txt> | tester bench <file> <iters>");
     return 1;
 }
