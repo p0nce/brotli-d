@@ -164,10 +164,16 @@ pure nothrow @nogc @safe:
     BrotliStatus error;
 
     // Make room for `n` more bytes.
+    pragma(inline, true)
     bool reserve(size_t n)
     {
         if (n <= buf.length - len)
             return true;
+        return grow(n);
+    }
+
+    bool grow(size_t n)
+    {
         if (!growable || n > limit - len)
         {
             error = BrotliStatus.outputTooSmall;
@@ -468,18 +474,25 @@ void buildHuffmanTable(scope uint[] table, scope const(ubyte)[] lengths)
 pragma(inline, true)
 uint readSymbol(ref BitReader br, scope const(uint)[] table)
 {
+    return readSymbolAt(br, table, 0);
+}
+
+// Decode one symbol, the table starting at `tables[base]`.
+pragma(inline, true)
+uint readSymbolAt(ref BitReader br, scope const(uint)[] tables, size_t base)
+{
     br.ensure(MAX_CODE_LENGTH);
     uint bits = br.peek();
-    uint entry = table[bits & HUFFMAN_TABLE_MASK];
+    size_t index = base + (bits & HUFFMAN_TABLE_MASK);
+    uint entry = tables[index];
     uint n = entry >> 16;
     if (n <= HUFFMAN_TABLE_BITS)
     {
         br.drop(n);
         return entry & 0xFFFF;
     }
-    size_t index = (bits & HUFFMAN_TABLE_MASK) + (entry & 0xFFFF)
-                 + ((bits & ((1u << n) - 1)) >> HUFFMAN_TABLE_BITS);
-    entry = table[index];
+    index += (entry & 0xFFFF) + ((bits & ((1u << n) - 1)) >> HUFFMAN_TABLE_BITS);
+    entry = tables[index];
     br.drop(HUFFMAN_TABLE_BITS + (entry >> 16));
     return entry & 0xFFFF;
 }
@@ -1096,29 +1109,32 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
             cats[0].blockLength -= cast(uint) run;
 
             uint literalType = cats[0].type;
-            const(ubyte)[] contextMap = literalMap[literalType * 64 .. literalType * 64 + 64];
+            size_t contextMapBase = literalType * 64;
+            const(uint)[] tables = literalTables.tables;
+            size_t stride = literalTables.stride;
             // Local copy of the bit reader, so that it can stay in registers.
             BitReader lbr = br;
             if (trivialLiteralContext[literalType])
             {
-                const(uint)[] table = literalTables[contextMap[0]];
+                size_t base = literalMap[contextMapBase] * stride;
                 foreach (ref b; dst[k .. k + run])
-                    b = cast(ubyte) readSymbol(lbr, table);
+                    b = cast(ubyte) readSymbolAt(lbr, tables, base);
             }
             else
             {
-                size_t lut = contextModes[literalType] * 512;
-                const(ubyte)[] lut1 = kContextLookup[lut .. lut + 256];
-                const(ubyte)[] lut2 = kContextLookup[lut + 256 .. lut + 512];
+                uint mode = contextModes[literalType];
+                const(ubyte[256])* lut1 = &kContextLookupTables[mode * 2];
+                const(ubyte[256])* lut2 = &kContextLookupTables[mode * 2 + 1];
                 size_t pos = o.len + k;
-                uint p1 = pos >= 1 ? o.buf[pos - 1] : 0;
-                uint p2 = pos >= 2 ? o.buf[pos - 2] : 0;
+                ubyte p1 = pos >= 1 ? o.buf[pos - 1] : 0;
+                ubyte p2 = pos >= 2 ? o.buf[pos - 2] : 0;
                 foreach (ref b; dst[k .. k + run])
                 {
-                    uint context = lut1[p1] | lut2[p2];
+                    uint context = (*lut1)[p1] | (*lut2)[p2];
+                    size_t base = literalMap[contextMapBase + context] * stride;
                     p2 = p1;
-                    p1 = readSymbol(lbr, literalTables[contextMap[context]]);
-                    b = cast(ubyte) p1;
+                    p1 = cast(ubyte) readSymbolAt(lbr, tables, base);
+                    b = p1;
                 }
             }
             br = lbr;
@@ -1213,7 +1229,10 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
             if (distance >= copyLength)
             {
                 // No overlap.
-                o.buf[o.len .. o.len + copyLength] = o.buf[src .. src + copyLength];
+                ubyte[] to = o.buf[o.len .. o.len + copyLength];
+                const(ubyte)[] from = o.buf[src .. src + copyLength];
+                foreach (j; 0 .. copyLength)
+                    to[j] = from[j];
             }
             else
             {
@@ -1391,6 +1410,17 @@ unittest
 // ---------------------------------------------------------------------------
 
 // Context lookup table, [mode * 512 + p1] | [mode * 512 + 256 + p2]
+// Same, as 8 tables: [mode * 2] for p1, [mode * 2 + 1] for p2.
+static immutable ubyte[256][8] kContextLookupTables = splitContextLookup();
+
+ubyte[256][8] splitContextLookup()
+{
+    ubyte[256][8] r;
+    foreach (i; 0 .. 8)
+        r[i][] = kContextLookup[i * 256 .. i * 256 + 256];
+    return r;
+}
+
 static immutable ubyte[2048] kContextLookup =
 [
      0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
