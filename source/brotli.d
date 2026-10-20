@@ -204,6 +204,7 @@ pure nothrow @nogc @safe:
     bool failed;    // Read past end of input.
 
     // Load whole bytes into acc, until it has more than 55 bits, or input is exhausted.
+    pragma(inline, true)
     void refill()
     {
         uint take = (63 - nbits) >> 3; // number of bytes that fit
@@ -235,12 +236,14 @@ pure nothrow @nogc @safe:
 
     // Next bits, without consuming them. At least `n` of them must be
     // asked with `ensure(n)` first, or they will read as zeroes.
+    pragma(inline, true)
     uint peek() const
     {
         return cast(uint) acc;
     }
 
     // Make sure n bits are buffered, if the input has them. n <= 56.
+    pragma(inline, true)
     void ensure(uint n)
     {
         if (nbits < n)
@@ -248,6 +251,7 @@ pure nothrow @nogc @safe:
     }
 
     // Consume n bits. Consuming bits past the end of input sets `failed`.
+    pragma(inline, true)
     void drop(uint n)
     {
         if (n > nbits)
@@ -263,6 +267,7 @@ pure nothrow @nogc @safe:
 
     // Read n bits, n <= 24. Reads past the end of input return zeroes,
     // and set `failed`.
+    pragma(inline, true)
     uint readBits(uint n)
     {
         assert(n <= 24);
@@ -460,6 +465,7 @@ void buildHuffmanTable(scope uint[] table, scope const(ubyte)[] lengths)
 }
 
 // Decode one symbol.
+pragma(inline, true)
 uint readSymbol(ref BitReader br, scope const(uint)[] table)
 {
     br.ensure(MAX_CODE_LENGTH);
@@ -951,6 +957,7 @@ pure nothrow @nogc @safe:
     const(uint)[] tables;
     size_t stride;
 
+    pragma(inline, true)
     const(uint)[] opIndex(size_t i) const
     {
         size_t start = i * stride;
@@ -1090,11 +1097,13 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
 
             uint literalType = cats[0].type;
             const(ubyte)[] contextMap = literalMap[literalType * 64 .. literalType * 64 + 64];
+            // Local copy of the bit reader, so that it can stay in registers.
+            BitReader lbr = br;
             if (trivialLiteralContext[literalType])
             {
                 const(uint)[] table = literalTables[contextMap[0]];
                 foreach (ref b; dst[k .. k + run])
-                    b = cast(ubyte) readSymbol(br, table);
+                    b = cast(ubyte) readSymbol(lbr, table);
             }
             else
             {
@@ -1108,10 +1117,11 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
                 {
                     uint context = lut1[p1] | lut2[p2];
                     p2 = p1;
-                    p1 = readSymbol(br, literalTables[contextMap[context]]);
+                    p1 = readSymbol(lbr, literalTables[contextMap[context]]);
                     b = cast(ubyte) p1;
                 }
             }
+            br = lbr;
             k += run;
         }
         o.len += insertLength;
