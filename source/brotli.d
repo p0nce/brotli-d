@@ -262,6 +262,12 @@ pure nothrow @nogc @safe:
         return cast(uint) acc;
     }
 
+    pragma(inline, true)
+    ulong peek64() const
+    {
+        return acc;
+    }
+
     // Make sure n bits are buffered, if the input has them. n <= 56.
     pragma(inline, true)
     void ensure(uint n)
@@ -270,7 +276,7 @@ pure nothrow @nogc @safe:
             refill();
     }
 
-    // Consume n bits, n <= 32. Consuming bits past the end of input makes
+    // Consume n bits, n <= 48. Consuming bits past the end of input makes
     // nbits negative: `failed` becomes true, and the missing bits read as zeroes
     // (bits of acc above nbits are zero).
     pragma(inline, true)
@@ -770,6 +776,33 @@ static immutable ubyte[24] kCopyLengthBits =
 static immutable ubyte[11] kInsertCodeBase = [0, 0, 0, 0, 8, 8, 0, 16, 8, 16, 16];
 static immutable ubyte[11] kCopyCodeBase   = [0, 8, 0, 8, 0, 8, 16, 0, 16, 8, 16];
 
+// Insert-and-copy symbol decoded: extra bits and offsets of both lengths.
+struct CommandCode
+{
+    ubyte insertBits;
+    ubyte copyBits;
+    ushort copyOffset;
+    uint insertOffset;
+}
+
+static immutable CommandCode[704] kCommandCodes = makeCommandCodes();
+
+CommandCode[704] makeCommandCodes()
+{
+    CommandCode[704] r;
+    foreach (cmd; 0 .. 704)
+    {
+        uint cell = cmd >> 6;
+        uint insertCode = kInsertCodeBase[cell] + ((cmd >> 3) & 7);
+        uint copyCode = kCopyCodeBase[cell] + (cmd & 7);
+        r[cmd].insertBits = kInsertLengthBits[insertCode];
+        r[cmd].copyBits = kCopyLengthBits[copyCode];
+        r[cmd].insertOffset = kInsertLengthOffset[insertCode];
+        r[cmd].copyOffset = cast(ushort) kCopyLengthOffset[copyCode];
+    }
+    return r;
+}
+
 // Distance short codes 0..15: index in the ring of last distances
 // (relative to the last one), and value offset.
 static immutable ubyte[16] kDistanceShortCodeIndexOffset =
@@ -1092,13 +1125,14 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
         }
         cats[1].blockLength--;
         uint cmd = readSymbol(br, commandTables[cats[1].type]);
-        uint cell = cmd >> 6;
-        uint insertCode = kInsertCodeBase[cell] + ((cmd >> 3) & 7);
-        uint copyCode = kCopyCodeBase[cell] + (cmd & 7);
-        size_t insertLength = kInsertLengthOffset[insertCode]
-                            + br.readBits(kInsertLengthBits[insertCode]);
-        size_t copyLength = kCopyLengthOffset[copyCode]
-                          + br.readBits(kCopyLengthBits[copyCode]);
+        CommandCode code = kCommandCodes[cmd];
+        uint insertBits = code.insertBits;
+        uint copyBits = code.copyBits;
+        br.ensure(insertBits + copyBits); // <= 48 bits
+        ulong extra = br.peek64();
+        br.drop(insertBits + copyBits);
+        size_t insertLength = code.insertOffset + cast(size_t)(extra & ((1UL << insertBits) - 1));
+        size_t copyLength = code.copyOffset + cast(size_t)((extra >> insertBits) & ((1UL << copyBits) - 1));
 
         // Literals, decoded in runs that stay in the same literal block.
         if (insertLength > remaining)
@@ -1159,7 +1193,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
         // Distance.
         long distance;
         bool pushDistance;
-        if (cell < 2)
+        if (cmd < 128)
         {
             // Implicit distance code 0: last distance, not pushed.
             distance = st.distRing[st.distRingIdx];
