@@ -199,35 +199,86 @@ struct BitReader
 pure nothrow @nogc @safe:
     const(ubyte)[] data;
     size_t pos;     // Next byte to load.
-    ulong acc;      // Loaded bits not yet consumed, LSB first. Always < 8 bits.
-    uint nbits;     // Number of bits in acc.
-    bool failed;    // Read past end of input, or invalid prefix code.
+    ulong acc;      // Loaded bits not yet consumed, LSB first. Bits above nbits are zero.
+    uint nbits;     // Number of bits in acc, <= 63.
+    bool failed;    // Read past end of input.
+
+    // Load whole bytes into acc, until it has more than 55 bits, or input is exhausted.
+    void refill()
+    {
+        uint take = (63 - nbits) >> 3; // number of bytes that fit
+        if (data.length - pos >= 8)
+        {
+            const(ubyte)[] p = data[pos .. pos + 8];
+            ulong v = p[0]
+                    | (cast(ulong)p[1] << 8)
+                    | (cast(ulong)p[2] << 16)
+                    | (cast(ulong)p[3] << 24)
+                    | (cast(ulong)p[4] << 32)
+                    | (cast(ulong)p[5] << 40)
+                    | (cast(ulong)p[6] << 48)
+                    | (cast(ulong)p[7] << 56);
+            v &= (1UL << (8 * take)) - 1; // take <= 7
+            acc |= v << nbits;
+            pos += take;
+            nbits += 8 * take;
+        }
+        else
+        {
+            for ( ; take > 0 && pos < data.length; --take)
+            {
+                acc |= cast(ulong)data[pos++] << nbits;
+                nbits += 8;
+            }
+        }
+    }
+
+    // Next bits, without consuming them. At least `n` of them must be
+    // asked with `ensure(n)` first, or they will read as zeroes.
+    uint peek() const
+    {
+        return cast(uint) acc;
+    }
+
+    // Make sure n bits are buffered, if the input has them. n <= 56.
+    void ensure(uint n)
+    {
+        if (nbits < n)
+            refill();
+    }
+
+    // Consume n bits. Consuming bits past the end of input sets `failed`.
+    void drop(uint n)
+    {
+        if (n > nbits)
+        {
+            failed = true;
+            acc = 0;
+            nbits = 0;
+            return;
+        }
+        acc >>= n;
+        nbits -= n;
+    }
 
     // Read n bits, n <= 24. Reads past the end of input return zeroes,
     // and set `failed`.
     uint readBits(uint n)
     {
         assert(n <= 24);
-        while (nbits < n)
-        {
-            uint b = 0;
-            if (pos < data.length)
-                b = data[pos++];
-            else
-                failed = true;
-            acc |= cast(ulong)b << nbits;
-            nbits += 8;
-        }
+        ensure(n);
         uint v = cast(uint)(acc & ((1UL << n) - 1));
-        acc >>= n;
-        nbits -= n;
+        drop(n);
         return v;
     }
 
-    // Skip to the next byte boundary. Padding bits must be zero.
+    // Skip to the next byte boundary, padding bits must be zero.
+    // Then give back the buffered bytes, so that `pos` is the next byte to read.
     bool jumpToByteBoundary()
     {
-        bool ok = acc == 0;
+        uint r = nbits & 7;
+        bool ok = (acc & ((1UL << r) - 1)) == 0;
+        pos -= nbits >> 3;
         acc = 0;
         nbits = 0;
         return ok;
@@ -276,60 +327,155 @@ uint readVarLenUint8(ref BitReader br)
 // Prefix codes
 // ---------------------------------------------------------------------------
 
-// A prefix code ("tree") is stored as an array of ushort:
-//   [0]              1 if the code has a single symbol (zero-length code)
-//   [1 .. 16]        number of codes of each length
-//   [16 .. 16 + n]   symbols, sorted by code length, then by symbol value
-// Its size is 16 + alphabet size.
-enum TREE_HEADER = 16;
+// A prefix code is decoded with a lookup table of uint entries, each of them
+// being (number of bits << 16 | symbol). The root table is indexed with the
+// next HUFFMAN_TABLE_BITS bits of input. Longer codes go through a 2nd level
+// table: the root entry then holds (2nd level table bits + HUFFMAN_TABLE_BITS) << 16
+// and the offset of the 2nd level table relative to the root entry.
+enum HUFFMAN_TABLE_BITS = 8;
+enum HUFFMAN_TABLE_MASK = 0xFF;
+enum MAX_CODE_LENGTH = 15;
 
 enum MAX_ALPHABET_SIZE = 704; // insert-and-copy alphabet is the largest
 
-// Build a canonical prefix code from code lengths (0 = unused symbol).
-// Lengths must describe a complete code, or a single symbol.
-void buildTree(scope ushort[] tree, scope const(ubyte)[] lengths)
+// Maximum table size for an alphabet size of (index * 32), max code length 15
+// and root table bits 8.
+static immutable ushort[23] kMaxHuffmanTableSize =
+[
+    256, 402, 436, 468, 500, 534, 566, 598, 630, 662, 694, 726, 758, 790, 822,
+    854, 886, 920, 952, 984, 1016, 1048, 1080
+];
+
+size_t maxHuffmanTableSize(uint alphabetSize)
 {
-    assert(tree.length >= TREE_HEADER + lengths.length);
-    ushort[16] offsets;
-    tree[0 .. TREE_HEADER] = 0;
-    foreach (l; lengths)
-        if (l != 0)
-            tree[l]++;
-    uint total = 0;
-    foreach (len; 1 .. 16)
-    {
-        offsets[len] = cast(ushort) total;
-        total += tree[len];
-    }
-    foreach (sym, l; lengths)
-        if (l != 0)
-            tree[TREE_HEADER + offsets[l]++] = cast(ushort) sym;
-    if (total == 1)
-        tree[0] = 1;
+    return kMaxHuffmanTableSize[(alphabetSize + 31) >> 5];
 }
 
-// Decode one symbol. Prefix codes are packed starting with their most
-// significant bit.
-uint readSymbol(ref BitReader br, scope const(ushort)[] tree)
+// Returns the binary reversed `key` incremented, for a code of `len` bits.
+uint getNextKey(uint key, uint len)
 {
-    if (tree[0] != 0)
-        return tree[TREE_HEADER];
-    int code = 0;  // bits read so far
-    int first = 0; // first code of the current length
-    int index = 0; // index of first code of current length in symbol list
-    foreach (len; 1 .. 16)
+    uint step = 1u << (len - 1);
+    while ((key & step) != 0)
+        step >>= 1;
+    return (key & (step - 1)) + step;
+}
+
+// Stores `item` in table[0], table[step], table[2 * step] .., table[end - step].
+void replicateValue(scope uint[] table, uint step, uint end, uint item)
+{
+    uint pos = end;
+    while (pos > 0)
     {
-        code |= br.readBits(1);
-        int count = tree[len];
-        if (code - count < first)
-            return tree[TREE_HEADER + index + (code - first)];
-        index += count;
-        first += count;
-        first <<= 1;
-        code <<= 1;
+        pos -= step;
+        table[pos] = item;
     }
-    br.failed = true; // incomplete code, can't happen with validated codes
-    return 0;
+}
+
+// Returns the bit width of the 2nd level table, for codes of length `len`.
+uint nextTableBitSize(ref const(int)[16] count, uint len)
+{
+    uint bits = len;
+    int left = 1 << (bits - HUFFMAN_TABLE_BITS);
+    while (bits < MAX_CODE_LENGTH)
+    {
+        left -= count[bits];
+        if (left <= 0)
+            break;
+        bits++;
+        left <<= 1;
+    }
+    return bits - HUFFMAN_TABLE_BITS;
+}
+
+// Build a decoding table from code lengths (0 = unused symbol).
+// Lengths must describe a complete code, or a single symbol.
+// `table` must have maxHuffmanTableSize(lengths.length) entries.
+void buildHuffmanTable(scope uint[] table, scope const(ubyte)[] lengths)
+{
+    assert(table.length >= maxHuffmanTableSize(cast(uint) lengths.length));
+    ushort[MAX_ALPHABET_SIZE] sorted; // symbols sorted by code length
+    int[16] count;  // number of codes of each length
+    int[16] offset; // offsets in sorted table for each length
+
+    foreach (l; lengths)
+        count[l]++;
+    offset[1] = 0;
+    foreach (len; 1 .. MAX_CODE_LENGTH)
+        offset[len + 1] = offset[len] + count[len];
+    foreach (sym, l; lengths)
+        if (l != 0)
+            sorted[offset[l]++] = cast(ushort) sym;
+
+    uint tableBits = HUFFMAN_TABLE_BITS;
+    uint tableSize = 1u << tableBits;
+    uint totalSize = tableSize;
+
+    // Special case: code with a single symbol, it takes zero bits.
+    if (offset[MAX_CODE_LENGTH] == 1)
+    {
+        table[0 .. totalSize] = sorted[0];
+        return;
+    }
+
+    // Fill in root table.
+    uint key = 0; // reversed prefix code
+    uint symbol = 0;
+    uint step = 1;
+    foreach (len; 1 .. HUFFMAN_TABLE_BITS + 1)
+    {
+        step <<= 1;
+        while (count[len] > 0)
+        {
+            replicateValue(table[key .. $], step, tableSize, (len << 16) | sorted[symbol++]);
+            key = getNextKey(key, len);
+            count[len]--;
+        }
+    }
+
+    // Fill in 2nd level tables and add pointers to root table.
+    uint mask = totalSize - 1;
+    uint low = uint.max;
+    uint currentOffset = 0;
+    step = 1;
+    foreach (len; HUFFMAN_TABLE_BITS + 1 .. MAX_CODE_LENGTH + 1)
+    {
+        step <<= 1;
+        while (count[len] > 0)
+        {
+            if ((key & mask) != low)
+            {
+                currentOffset += tableSize;
+                tableBits = nextTableBitSize(count, len);
+                tableSize = 1u << tableBits;
+                totalSize += tableSize;
+                low = key & mask;
+                table[low] = ((tableBits + HUFFMAN_TABLE_BITS) << 16) | (currentOffset - low);
+            }
+            replicateValue(table[currentOffset + (key >> HUFFMAN_TABLE_BITS) .. $], step, tableSize,
+                           ((len - HUFFMAN_TABLE_BITS) << 16) | sorted[symbol++]);
+            key = getNextKey(key, len);
+            count[len]--;
+        }
+    }
+}
+
+// Decode one symbol.
+uint readSymbol(ref BitReader br, scope const(uint)[] table)
+{
+    br.ensure(MAX_CODE_LENGTH);
+    uint bits = br.peek();
+    uint entry = table[bits & HUFFMAN_TABLE_MASK];
+    uint n = entry >> 16;
+    if (n <= HUFFMAN_TABLE_BITS)
+    {
+        br.drop(n);
+        return entry & 0xFFFF;
+    }
+    size_t index = (bits & HUFFMAN_TABLE_MASK) + (entry & 0xFFFF)
+                 + ((bits & ((1u << n) - 1)) >> HUFFMAN_TABLE_BITS);
+    entry = table[index];
+    br.drop(HUFFMAN_TABLE_BITS + (entry >> 16));
+    return entry & 0xFFFF;
 }
 
 static immutable ubyte[18] kCodeLengthCodeOrder =
@@ -352,11 +498,11 @@ uint readCodeLengthCodeLength(ref BitReader br)
     }
 }
 
-// Read a prefix code for an alphabet of `alphabetSize` symbols into `tree`.
-bool readPrefixCode(ref BitReader br, uint alphabetSize, scope ushort[] tree)
+// Read a prefix code for an alphabet of `alphabetSize` symbols, build its decoding table.
+bool readPrefixCode(ref BitReader br, uint alphabetSize, scope uint[] table)
 {
     assert(alphabetSize >= 2 && alphabetSize <= MAX_ALPHABET_SIZE);
-    assert(tree.length >= TREE_HEADER + alphabetSize);
+    assert(table.length >= maxHuffmanTableSize(alphabetSize));
 
     ubyte[MAX_ALPHABET_SIZE] lengthsStorage = 0;
     ubyte[] lengths = lengthsStorage[0 .. alphabetSize];
@@ -432,8 +578,8 @@ bool readPrefixCode(ref BitReader br, uint alphabetSize, scope ushort[] tree)
         if (space != 0 && numCodes != 1)
             return false;
 
-        ushort[TREE_HEADER + 18] clTree;
-        buildTree(clTree[], clLengths[]);
+        uint[kMaxHuffmanTableSize[(18 + 31) >> 5]] clTable;
+        buildHuffmanTable(clTable[], clLengths[]);
 
         // Then the symbol code lengths.
         uint symbol = 0;
@@ -443,7 +589,7 @@ bool readPrefixCode(ref BitReader br, uint alphabetSize, scope ushort[] tree)
         space = 32768;
         while (symbol < alphabetSize && space > 0)
         {
-            uint codeLen = readSymbol(br, clTree[]);
+            uint codeLen = readSymbol(br, clTable[]);
             if (codeLen < 16)
             {
                 repeat = 0;
@@ -482,7 +628,7 @@ bool readPrefixCode(ref BitReader br, uint alphabetSize, scope ushort[] tree)
         if (space != 0)
             return false;
     }
-    buildTree(tree, lengths);
+    buildHuffmanTable(table, lengths);
     return true;
 }
 
@@ -518,14 +664,14 @@ bool decodeContextMap(ref BitReader br, scope ubyte[] map, out uint numTrees)
     if (br.readBits(1) != 0)
         maxRunLengthPrefix = br.readBits(4) + 1;
     uint alphabetSize = numTrees + maxRunLengthPrefix;
-    ushort[TREE_HEADER + 256 + 16] treeStorage;
-    ushort[] tree = treeStorage[0 .. TREE_HEADER + alphabetSize];
-    if (!readPrefixCode(br, alphabetSize, tree))
+    uint[kMaxHuffmanTableSize[(256 + 16 + 31) >> 5]] tableStorage;
+    uint[] table = tableStorage[0 .. maxHuffmanTableSize(alphabetSize)];
+    if (!readPrefixCode(br, alphabetSize, table))
         return false;
     size_t i = 0;
     while (i < map.length)
     {
-        uint code = readSymbol(br, tree);
+        uint code = readSymbol(br, table);
         if (code == 0)
         {
             map[i++] = 0;
@@ -736,8 +882,8 @@ pure nothrow @nogc @safe:
     uint numTypes;
     uint[2] ring;     // [second-to-last type, last type]
     uint blockLength; // remaining in current block
-    ushort[TREE_HEADER + 256 + 2] typeTree;
-    ushort[TREE_HEADER + NUM_BLOCK_LENGTH_CODES] lengthTree;
+    uint[kMaxHuffmanTableSize[(256 + 2 + 31) >> 5]] typeTable;
+    uint[kMaxHuffmanTableSize[(NUM_BLOCK_LENGTH_CODES + 31) >> 5]] lengthTable;
 
     uint type() const
     {
@@ -745,9 +891,9 @@ pure nothrow @nogc @safe:
     }
 }
 
-uint readBlockLength(ref BitReader br, scope const(ushort)[] tree)
+uint readBlockLength(ref BitReader br, scope const(uint)[] table)
 {
-    uint code = readSymbol(br, tree);
+    uint code = readSymbol(br, table);
     return kBlockLengthOffset[code] + br.readBits(kBlockLengthBits[code]);
 }
 
@@ -755,8 +901,8 @@ bool readBlockSwitch(ref BitReader br, ref BlockCategory cat)
 {
     if (cat.numTypes < 2)
         return false; // only reachable with an exhausted 16M block
-    uint blockType = readSymbol(br, cat.typeTree[]);
-    cat.blockLength = readBlockLength(br, cat.lengthTree[]);
+    uint blockType = readSymbol(br, cat.typeTable[]);
+    cat.blockLength = readBlockLength(br, cat.lengthTable[]);
     if (blockType == 1)
         blockType = cat.ring[1] + 1;
     else if (blockType == 0)
@@ -774,17 +920,17 @@ bool readBlockSwitch(ref BitReader br, ref BlockCategory cat)
 struct Workspace
 {
 pure nothrow @nogc @safe:
-    ushort[] literalTrees;
-    ushort[] commandTrees;
-    ushort[] distanceTrees;
+    uint[] literalTables;
+    uint[] commandTables;
+    uint[] distanceTables;
     ubyte[] literalContextMap;
     ubyte[] distanceContextMap;
 
     void release()
     {
-        freeArray(literalTrees);
-        freeArray(commandTrees);
-        freeArray(distanceTrees);
+        freeArray(literalTables);
+        freeArray(commandTables);
+        freeArray(distanceTables);
         freeArray(literalContextMap);
         freeArray(distanceContextMap);
     }
@@ -798,20 +944,40 @@ struct StreamState
     uint distRingIdx = 3; // index of the last distance
 }
 
-// Read `trees.length / stride` prefix codes, each of them taking `stride` ushorts.
-bool readTreeGroup(ref BitReader br, uint alphabetSize, scope ushort[] trees, size_t stride)
+// Prefix codes of the same kind, each of them using `stride` table entries.
+struct TableGroup
 {
-    assert(stride == TREE_HEADER + alphabetSize && trees.length % stride == 0);
-    for (size_t i = 0; i < trees.length; i += stride)
-        if (!readPrefixCode(br, alphabetSize, trees[i .. i + stride]))
-            return false;
-    return true;
+pure nothrow @nogc @safe:
+    const(uint)[] tables;
+    size_t stride;
+
+    const(uint)[] opIndex(size_t i) const
+    {
+        size_t start = i * stride;
+        return tables[start .. start + stride];
+    }
+}
+
+// Read `count` prefix codes into `storage`.
+BrotliStatus readTableGroup(ref BitReader br, uint alphabetSize, uint count,
+                            ref uint[] storage, out TableGroup group)
+{
+    size_t stride = maxHuffmanTableSize(alphabetSize);
+    if (!ensureLength(storage, stride * count))
+        return BrotliStatus.outOfMemory;
+    foreach (i; 0 .. count)
+        if (!readPrefixCode(br, alphabetSize, storage[i * stride .. (i + 1) * stride]))
+            return BrotliStatus.corrupted;
+    group.tables = storage[0 .. stride * count];
+    group.stride = stride;
+    return BrotliStatus.success;
 }
 
 BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref Workspace ws,
                                        ref StreamState st, size_t metaBlockLength)
 {
     enum corrupted = BrotliStatus.corrupted;
+    enum oom = BrotliStatus.outOfMemory;
 
     // Block types and counts: 0 = literals, 1 = commands, 2 = distances.
     BlockCategory[3] cats;
@@ -821,12 +987,11 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
         cat.ring = [1, 0];
         if (cat.numTypes >= 2)
         {
-            uint alphabetSize = cat.numTypes + 2;
-            if (!readPrefixCode(br, alphabetSize, cat.typeTree[0 .. TREE_HEADER + alphabetSize]))
+            if (!readPrefixCode(br, cat.numTypes + 2, cat.typeTable[]))
                 return corrupted;
-            if (!readPrefixCode(br, NUM_BLOCK_LENGTH_CODES, cat.lengthTree[]))
+            if (!readPrefixCode(br, NUM_BLOCK_LENGTH_CODES, cat.lengthTable[]))
                 return corrupted;
-            cat.blockLength = readBlockLength(br, cat.lengthTree[]);
+            cat.blockLength = readBlockLength(br, cat.lengthTable[]);
         }
         else
             cat.blockLength = 1u << 24;
@@ -838,8 +1003,6 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
     ubyte[256] contextModes;
     foreach (i; 0 .. cats[0].numTypes)
         contextModes[i] = cast(ubyte) br.readBits(2);
-
-    enum oom = BrotliStatus.outOfMemory;
 
     uint numLiteralTrees, numDistanceTrees;
     size_t literalMapSize = cats[0].numTypes * 64;
@@ -856,39 +1019,30 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
     if (!decodeContextMap(br, distanceMap, numDistanceTrees))
         return corrupted;
 
-    size_t literalStride = TREE_HEADER + NUM_LITERAL_CODES;
-    if (!ensureLength(ws.literalTrees, literalStride * numLiteralTrees))
-        return oom;
-    if (!readTreeGroup(br, NUM_LITERAL_CODES, ws.literalTrees[0 .. literalStride * numLiteralTrees], literalStride))
-        return corrupted;
-
-    size_t commandStride = TREE_HEADER + NUM_COMMAND_CODES;
-    if (!ensureLength(ws.commandTrees, commandStride * cats[1].numTypes))
-        return oom;
-    if (!readTreeGroup(br, NUM_COMMAND_CODES, ws.commandTrees[0 .. commandStride * cats[1].numTypes], commandStride))
-        return corrupted;
-
+    TableGroup literalTables, commandTables, distanceTables;
+    BrotliStatus r = readTableGroup(br, NUM_LITERAL_CODES, numLiteralTrees,
+                                    ws.literalTables, literalTables);
+    if (r != BrotliStatus.success)
+        return r;
+    r = readTableGroup(br, NUM_COMMAND_CODES, cats[1].numTypes, ws.commandTables, commandTables);
+    if (r != BrotliStatus.success)
+        return r;
     uint distanceAlphabetSize = 16 + ndirect + (48u << npostfix);
-    size_t distanceStride = TREE_HEADER + distanceAlphabetSize;
-    if (!ensureLength(ws.distanceTrees, distanceStride * numDistanceTrees))
-        return oom;
-    if (!readTreeGroup(br, distanceAlphabetSize, ws.distanceTrees[0 .. distanceStride * numDistanceTrees], distanceStride))
-        return corrupted;
+    r = readTableGroup(br, distanceAlphabetSize, numDistanceTrees, ws.distanceTables, distanceTables);
+    if (r != BrotliStatus.success)
+        return r;
 
     if (br.failed)
         return corrupted;
 
-    const(ushort)[] literalTree(size_t i)
+    // For each literal block type: is the same prefix code used in every context?
+    bool[256] trivialLiteralContext;
+    foreach (t; 0 .. cats[0].numTypes)
     {
-        return ws.literalTrees[i * literalStride .. (i + 1) * literalStride];
-    }
-    const(ushort)[] commandTree(size_t i)
-    {
-        return ws.commandTrees[i * commandStride .. (i + 1) * commandStride];
-    }
-    const(ushort)[] distanceTree(size_t i)
-    {
-        return ws.distanceTrees[i * distanceStride .. (i + 1) * distanceStride];
+        trivialLiteralContext[t] = true;
+        foreach (x; literalMap[t * 64 .. t * 64 + 64])
+            if (x != literalMap[t * 64])
+                trivialLiteralContext[t] = false;
     }
 
     immutable(ubyte)[] dict = dictionary();
@@ -906,7 +1060,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
                 return corrupted;
         }
         cats[1].blockLength--;
-        uint cmd = readSymbol(br, commandTree(cats[1].type));
+        uint cmd = readSymbol(br, commandTables[cats[1].type]);
         uint cell = cmd >> 6;
         uint insertCode = kInsertCodeBase[cell] + ((cmd >> 3) & 7);
         uint copyCode = kCopyCodeBase[cell] + (cmd & 7);
@@ -915,27 +1069,52 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
         size_t copyLength = kCopyLengthOffset[copyCode]
                           + br.readBits(kCopyLengthBits[copyCode]);
 
-        // Literals.
+        // Literals, decoded in runs that stay in the same literal block.
         if (insertLength > remaining)
             return corrupted;
         if (!o.reserve(insertLength))
             return o.error;
-        foreach (k; 0 .. insertLength)
+        ubyte[] dst = o.buf[o.len .. o.len + insertLength];
+        size_t k = 0;
+        while (k < insertLength)
         {
             if (cats[0].blockLength == 0)
             {
                 if (!readBlockSwitch(br, cats[0]))
                     return corrupted;
             }
-            cats[0].blockLength--;
+            size_t run = insertLength - k;
+            if (run > cats[0].blockLength)
+                run = cats[0].blockLength;
+            cats[0].blockLength -= cast(uint) run;
+
             uint literalType = cats[0].type;
-            uint mode = contextModes[literalType];
-            uint p1 = o.len >= 1 ? o.buf[o.len - 1] : 0;
-            uint p2 = o.len >= 2 ? o.buf[o.len - 2] : 0;
-            uint context = kContextLookup[mode * 512 + p1] | kContextLookup[mode * 512 + 256 + p2];
-            uint treeIndex = literalMap[literalType * 64 + context];
-            o.buf[o.len++] = cast(ubyte) readSymbol(br, literalTree(treeIndex));
+            const(ubyte)[] contextMap = literalMap[literalType * 64 .. literalType * 64 + 64];
+            if (trivialLiteralContext[literalType])
+            {
+                const(uint)[] table = literalTables[contextMap[0]];
+                foreach (ref b; dst[k .. k + run])
+                    b = cast(ubyte) readSymbol(br, table);
+            }
+            else
+            {
+                size_t lut = contextModes[literalType] * 512;
+                const(ubyte)[] lut1 = kContextLookup[lut .. lut + 256];
+                const(ubyte)[] lut2 = kContextLookup[lut + 256 .. lut + 512];
+                size_t pos = o.len + k;
+                uint p1 = pos >= 1 ? o.buf[pos - 1] : 0;
+                uint p2 = pos >= 2 ? o.buf[pos - 2] : 0;
+                foreach (ref b; dst[k .. k + run])
+                {
+                    uint context = lut1[p1] | lut2[p2];
+                    p2 = p1;
+                    p1 = readSymbol(br, literalTables[contextMap[context]]);
+                    b = cast(ubyte) p1;
+                }
+            }
+            k += run;
         }
+        o.len += insertLength;
         remaining -= insertLength;
         if (remaining == 0)
             break; // the copy part of the last command is ignored
@@ -959,7 +1138,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
             cats[2].blockLength--;
             uint distanceContext = copyLength > 4 ? 3 : cast(uint)(copyLength - 2);
             uint treeIndex = distanceMap[cats[2].type * 4 + distanceContext];
-            uint dcode = readSymbol(br, distanceTree(treeIndex));
+            uint dcode = readSymbol(br, distanceTables[treeIndex]);
             if (dcode < 16)
             {
                 uint idx = (st.distRingIdx + kDistanceShortCodeIndexOffset[dcode]) & 3;
@@ -1021,8 +1200,19 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
             if (!o.reserve(copyLength))
                 return o.error;
             size_t src = o.len - cast(size_t) distance;
-            foreach (k; 0 .. copyLength) // may overlap, byte per byte
-                o.buf[o.len + k] = o.buf[src + k];
+            if (distance >= copyLength)
+            {
+                // No overlap.
+                o.buf[o.len .. o.len + copyLength] = o.buf[src .. src + copyLength];
+            }
+            else
+            {
+                // Overlap, byte per byte.
+                ubyte[] block = o.buf[src .. o.len + copyLength];
+                size_t d = cast(size_t) distance;
+                foreach (j; d .. d + copyLength)
+                    block[j] = block[j - d];
+            }
             o.len += copyLength;
             remaining -= copyLength;
         }
