@@ -1,0 +1,13 @@
+.dub/
+*.exe
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+test/mismatch_*.br
+test/crash.br
+__dummy_docs/
+docs.json
+dub.selections.json
+*.exp
