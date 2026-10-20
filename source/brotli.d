@@ -206,13 +206,27 @@ pure nothrow @nogc @safe:
     const(ubyte)[] data;
     size_t pos;     // Next byte to load.
     ulong acc;      // Loaded bits not yet consumed, LSB first. Bits above nbits are zero.
-    uint nbits;     // Number of bits in acc, <= 63.
-    bool failed;    // Read past end of input.
+    int nbits;      // Number of bits in acc, <= 63. Negative once bits past
+                    // the end of input have been consumed.
+    bool overrun;   // Whole bytes were read past the end of input.
+
+    // Read past end of input?
+    bool failed() const
+    {
+        return nbits < 0 || overrun;
+    }
 
     // Load whole bytes into acc, until it has more than 55 bits, or input is exhausted.
     pragma(inline, true)
     void refill()
     {
+        if (nbits < 0)
+        {
+            // Already failed, stay so.
+            acc = 0;
+            nbits = -1;
+            return;
+        }
         uint take = (63 - nbits) >> 3; // number of bytes that fit
         if (data.length - pos >= 8)
         {
@@ -252,21 +266,16 @@ pure nothrow @nogc @safe:
     pragma(inline, true)
     void ensure(uint n)
     {
-        if (nbits < n)
+        if (nbits < cast(int) n)
             refill();
     }
 
-    // Consume n bits. Consuming bits past the end of input sets `failed`.
+    // Consume n bits, n <= 32. Consuming bits past the end of input makes
+    // nbits negative: `failed` becomes true, and the missing bits read as zeroes
+    // (bits of acc above nbits are zero).
     pragma(inline, true)
     void drop(uint n)
     {
-        if (n > nbits)
-        {
-            failed = true;
-            acc = 0;
-            nbits = 0;
-            return;
-        }
         acc >>= n;
         nbits -= n;
     }
@@ -287,6 +296,8 @@ pure nothrow @nogc @safe:
     // Then give back the buffered bytes, so that `pos` is the next byte to read.
     bool jumpToByteBoundary()
     {
+        if (nbits < 0)
+            return false;
         uint r = nbits & 7;
         bool ok = (acc & ((1UL << r) - 1)) == 0;
         pos -= nbits >> 3;
@@ -301,7 +312,7 @@ pure nothrow @nogc @safe:
         assert(nbits == 0);
         if (dst.length > data.length - pos)
         {
-            failed = true;
+            overrun = true;
             return false;
         }
         dst[] = data[pos .. pos + dst.length];
@@ -315,7 +326,7 @@ pure nothrow @nogc @safe:
         assert(nbits == 0);
         if (n > data.length - pos)
         {
-            failed = true;
+            overrun = true;
             return false;
         }
         pos += n;
