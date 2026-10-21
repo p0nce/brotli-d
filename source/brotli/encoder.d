@@ -877,6 +877,23 @@ uint copyLengthCode(size_t len)
     return 23;
 }
 
+// copyLengthCode(len) for len < 2118, longer lengths have code 23.
+static immutable ubyte[2118] kCopyLengthCode = makeCopyLengthCodes();
+
+ubyte[2118] makeCopyLengthCodes()
+{
+    ubyte[2118] t;
+    foreach (len; 2 .. t.length)
+        t[len] = cast(ubyte) copyLengthCode(len);
+    return t;
+}
+
+pragma(inline, true)
+uint fastCopyLengthCode(size_t len)
+{
+    return len < kCopyLengthCode.length ? kCopyLengthCode[len] : 23;
+}
+
 // Cell (symbol >> 6) of insert-and-copy symbols with an explicit distance,
 // indexed by (insert code >> 3) * 3 + (copy code >> 3).
 static immutable ubyte[9] kCommandCell = makeCommandCells();
@@ -2513,6 +2530,22 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
     foreach (k; 0 .. 4)
         nodes[0].cache[k] = cast(uint) last[k];
 
+    // Cost of the insert-and-copy symbol and copy extra bits, for each
+    // (insert code, copy code): with an explicit distance, and with the last
+    // distance (uint.max if it can't be implicit).
+    uint[24][24] withDistance;
+    uint[24][24] withLastDistance;
+    foreach (ic; 0 .. 24)
+    {
+        foreach (cc; 0 .. 24)
+        {
+            uint extra = kCopyLengthBits[cc] * COST_ONE_BIT;
+            withDistance[ic][cc] = model.commandCost[commandSymbol(ic, cc, false)] + extra;
+            uint implicit = commandSymbol(ic, cc, true);
+            withLastDistance[ic][cc] = implicit < 128 ? model.commandCost[implicit] + extra : uint.max;
+        }
+    }
+
     StartPosQueue queue;
     size_t matchIndex = 0;
     size_t i = 0;
@@ -2564,6 +2597,8 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                 uint insertCode = insertLengthCode(insertLength);
                 long baseCost = sp.costDiff + literalCosts[i] + kInsertLengthBits[insertCode] * COST_ONE_BIT;
                 const(uint)[] cache = nodes[sp.pos].cache[];
+                const(uint)[] explicitCost = withDistance[insertCode][];
+                const(uint)[] lastDistanceCost = withLastDistance[insertCode][];
 
                 void update(size_t len, size_t codedLength, size_t distance, long cost)
                 {
@@ -2602,10 +2637,12 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     {
                         if (l > maxZopfliLen && l < len)
                             l = len; // long copies: only the full length
-                        uint copyCode = copyLengthCode(l);
-                        uint cmd = commandSymbol(insertCode, copyCode, code == 0);
-                        long cost = (cmd < 128 ? baseCost : distanceCost)
-                                  + kCopyLengthBits[copyCode] * COST_ONE_BIT + model.commandCost[cmd];
+                        uint copyCode = fastCopyLengthCode(l);
+                        long cost;
+                        if (code == 0 && lastDistanceCost[copyCode] != uint.max)
+                            cost = baseCost + lastDistanceCost[copyCode];
+                        else
+                            cost = distanceCost + explicitCost[copyCode];
                         update(l, l, cast(size_t) d, cost);
                     }
                     bestLen = len;
@@ -2627,10 +2664,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     for (; len <= maxMatchLen; ++len)
                     {
                         size_t codedLength = isDictionary ? m.wordLength : len;
-                        uint copyCode = copyLengthCode(codedLength);
-                        uint cmd = commandSymbol(insertCode, copyCode, false);
-                        long cost = distanceCost + kCopyLengthBits[copyCode] * COST_ONE_BIT
-                                  + model.commandCost[cmd];
+                        long cost = distanceCost + explicitCost[fastCopyLengthCode(codedLength)];
                         update(len, codedLength, m.distance, cost);
                     }
                 }
