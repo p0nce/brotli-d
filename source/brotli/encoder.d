@@ -220,6 +220,33 @@ pure nothrow @nogc @safe:
         acc = 0;
     }
 
+    // Append the first `numBits` bits of `bytes`, as written by a BitWriter.
+    void writeBitString(scope const(ubyte)[] bytes, ulong numBits)
+    {
+        size_t whole = cast(size_t)(numBits / 8);
+        size_t i = 0;
+        for (; i + 4 <= whole; i += 4)
+            writeBits(32, bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (cast(uint) bytes[i + 3] << 24));
+        for (; i < whole; ++i)
+            writeBits(8, bytes[i]);
+        uint rest = numBits % 8;
+        if (rest != 0)
+            writeBits(rest, bytes[whole] & ((1u << rest) - 1));
+    }
+
+    // The bits written, as bytes: buf[0 .. pos], then the pending bits.
+    // Returns false if out of memory.
+    bool copyTo(ref MallocArray!ubyte dst) const
+    {
+        size_t numBytes = pos + (nbits + 7) / 8;
+        if (!dst.ensure(numBytes))
+            return false;
+        dst[0 .. pos] = buf[0 .. pos];
+        foreach (k; pos .. numBytes)
+            dst[k] = cast(ubyte)(acc >> (8 * (k - pos)));
+        return true;
+    }
+
     // Write whole bytes, must be on a byte boundary.
     void writeBytes(scope const(ubyte)[] data)
     {
@@ -3615,6 +3642,8 @@ pure nothrow @nogc @safe:
     CommandBuffer previousCommands;
     CommandBuffer bestCommands;
     BitWriter trial;
+    MallocArray!ubyte bestMetaBlock; // when keeping the best pass, its meta-block
+    ulong bestMetaBlockBits;
     MatchBuffer matches;
     MallocArray!uint numMatches;
     MallocArray!long literalCosts;
@@ -4104,8 +4133,9 @@ BrotliStatus optimalCommands(ref TreeHasher t, scope const(ubyte)[] data, size_t
             {
                 bestBits = ws.trial.bitPosition();
                 bestLast = passLast;
-                if (!copyCommands(ws.commands, ws.bestCommands))
+                if (!copyCommands(ws.commands, ws.bestCommands) || !ws.trial.copyTo(ws.bestMetaBlock))
                     return oom;
+                ws.bestMetaBlockBits = bestBits;
             }
         }
         else
@@ -4218,7 +4248,15 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
         }
 
         BitWriter.Mark mark = w.mark();
-        BrotliStatus r = writeCompressedMetaBlock(w, input, pos, length, ws.commands[], isLast, params, ws);
+        BrotliStatus r;
+        if (optimal && params.optimalKeepBest)
+        {
+            // Already written aside, by optimalCommands.
+            w.writeBitString(ws.bestMetaBlock[], ws.bestMetaBlockBits);
+            r = w.error;
+        }
+        else
+            r = writeCompressedMetaBlock(w, input, pos, length, ws.commands[], isLast, params, ws);
         if (r == BrotliStatus.outOfMemory)
             return r;
 
