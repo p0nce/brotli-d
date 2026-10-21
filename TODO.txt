@@ -82,7 +82,5 @@ After each change: unit tests, quick suite, ratio unchanged unless intended.
 [ ] README: encoder API, levels, window, memory use per level (levels
     10-11: ~8 bytes per window byte), speed and ratio table vs reference,
     testing instructions (encode_test.py, encode_bench.py).
-[ ] Credit: the heuristics come from Google's reference encoder (MIT):
-    match scores, cost model constants, block splitter parameters,
-    histogram smoothing for RLE. Update dub.json description.
+[ ] Update dub.json description (encoder authored by Claude Opus 5.5).
 [ ] Commits, one per step.

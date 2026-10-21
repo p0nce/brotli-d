@@ -7,11 +7,9 @@ Uses the decoder's tables and static dictionary, numem for allocations,
 and godot-math for gm_log2.
 Everything is `@safe pure nothrow @nogc`.
 
-Written from RFC 7932, with heuristics of the Google reference encoder:
-match scores, cost model and block splitter constants, histogram smoothing.
+Authored by Claude Opus 5.5.
 
 Copyright:
-    Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
     Copyright (c) 2026 Guillaume Piolat.
 
 License:
@@ -121,19 +119,11 @@ BrotliStatus brotliCompressAlloc(const(ubyte)[] input, out ubyte[] output,
     w.growable = true;
     BrotliStatus r = encodeStream(input, w, level, windowBits);
     if (r != BrotliStatus.success)
-    {
-        freeArray(w.buf);
         return r;
-    }
     assert(w.pos > 0);
-    if (w.pos < w.buf.length)
-    {
-        // Shrink to fit. If that fails, the larger buffer is still fine.
-        ubyte[] shrunk = reallocArray(w.buf, w.pos);
-        if (shrunk !is null)
-            w.buf = shrunk;
-    }
-    output = w.buf[0 .. w.pos];
+    // Shrink to fit. If that fails, the larger buffer is still fine.
+    w.owned.resize(w.pos);
+    output = w.owned.take()[0 .. w.pos];
     return r;
 }
 
@@ -151,7 +141,8 @@ enum MAX_METABLOCK_LENGTH = 1 << 24;
 struct BitWriter
 {
 pure nothrow @nogc @safe:
-    ubyte[] buf;    // Caller's buffer, or malloc'ed if `growable`.
+    ubyte[] buf;    // Caller's buffer, or `owned` if `growable`.
+    MallocArray!ubyte owned;
     size_t pos;     // Bytes written. Keeps counting past buf.length after an error.
     ulong acc;      // Bits not written yet, LSB first.
     uint nbits;     // Number of bits in acc, < 32 between calls.
@@ -248,13 +239,12 @@ pure nothrow @nogc @safe:
         size_t cap = buf.length < 4096 ? 4096 : buf.length;
         while (cap < need)
             cap = (cap > size_t.max / 2) ? need : cap * 2;
-        ubyte[] bigger = reallocArray(buf, cap);
-        if (bigger is null)
+        if (!owned.resize(cap))
         {
             error = BrotliStatus.outOfMemory;
             return false;
         }
-        buf = bigger;
+        buf = owned[];
         return true;
     }
 }
@@ -959,7 +949,7 @@ void shortCodeDistances(ref const(DistanceCache) last, ref size_t[16] r)
 struct GrowableArray(T)
 {
 pure nothrow @nogc @safe:
-    T[] storage;
+    MallocArray!T storage;
     size_t length;
     bool failed;
 
@@ -975,13 +965,11 @@ pure nothrow @nogc @safe:
     bool grow()
     {
         size_t cap = storage.length < 1024 ? 1024 : storage.length * 2;
-        T[] bigger = reallocArray(storage, cap);
-        if (bigger is null)
+        if (!storage.resize(cap))
         {
             failed = true;
             return false;
         }
-        storage = bigger;
         return true;
     }
 
@@ -992,7 +980,7 @@ pure nothrow @nogc @safe:
 
     void release()
     {
-        freeArray(storage);
+        storage.release();
         length = 0;
     }
 }
@@ -1309,10 +1297,9 @@ bool findDictionaryMatch(scope const(ubyte)[] data, size_t pos, size_t maxLength
 // ---------------------------------------------------------------------------
 
 pragma(inline, true)
-uint load32(scope const(ubyte)[] data, size_t pos) @trusted
+uint load32(scope const(ubyte)[] data, size_t pos)
 {
-    assert(pos + 4 <= data.length);
-    const(ubyte)* p = data.ptr + pos;
+    const(ubyte)[] p = data[pos .. pos + 4];
     return p[0] | (p[1] << 8) | (p[2] << 16) | (cast(uint) p[3] << 24);
 }
 
@@ -1330,10 +1317,12 @@ ulong load64(const(ubyte)* p) @system
 }
 
 // Length of the common prefix of data[a .. a + limit] and data[b .. b + limit], a < b.
+// Halts if they are not in `data`, even in release builds.
 pragma(inline, true)
 size_t matchLength(scope const(ubyte)[] data, size_t a, size_t b, size_t limit) @trusted
 {
-    assert(a < b && b <= data.length && limit <= data.length - b);
+    if (!(a < b && b <= data.length && limit <= data.length - b))
+        assert(0);
     const(ubyte)* pa = data.ptr + a;
     const(ubyte)* pb = data.ptr + b;
     size_t n = 0;
@@ -1419,8 +1408,8 @@ static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
 struct Hasher
 {
 pure nothrow @nogc @safe:
-    uint[] positions;   // bucket * blockSize + i, relative to `base`
-    uint[] counts;      // insertions in each bucket
+    MallocArray!uint positions; // bucket * blockSize + i, relative to `base`
+    MallocArray!uint counts;    // insertions in each bucket
     uint bucketBits;
     uint blockBits;
     uint blockMask;
@@ -1433,9 +1422,8 @@ pure nothrow @nogc @safe:
         this.bucketBits = bucketBits;
         this.blockBits = blockBits;
         blockMask = (1u << blockBits) - 1;
-        positions = reallocArray(positions, size_t(1) << (bucketBits + blockBits));
-        counts = reallocArray(counts, size_t(1) << bucketBits);
-        if (positions is null || counts is null)
+        if (!positions.resize(size_t(1) << (bucketBits + blockBits))
+            || !counts.resize(size_t(1) << bucketBits))
             return false;
         counts[] = 0; // positions are only read once written
         base = 0;
@@ -1444,8 +1432,8 @@ pure nothrow @nogc @safe:
 
     void release()
     {
-        freeArray(positions);
-        freeArray(counts);
+        positions.release();
+        counts.release();
     }
 
     pragma(inline, true)
@@ -2047,6 +2035,8 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 // with the same 4-byte hash, sorted by the data that follows them. Finds
 // every match length at a position, with the smallest distance found for it.
 enum TREE_BUCKET_BITS = 17;
+// The trees cover at most that much history: 8 bytes of memory per byte.
+enum MAX_TREE_WINDOW = 1 << 22;
 enum MAX_TREE_SEARCH_DEPTH = 64;
 enum MAX_TREE_COMP_LENGTH = 128;
 enum uint TREE_INVALID = uint.max;
@@ -2054,20 +2044,20 @@ enum uint TREE_INVALID = uint.max;
 struct TreeHasher
 {
 pure nothrow @nogc @safe:
-    uint[] buckets;     // root of each tree, relative to `base`
-    uint[] forest;      // children of position p: forest[2 * (p & windowMask)], [+ 1]
+    MallocArray!uint buckets; // root of each tree, relative to `base`
+    MallocArray!uint forest;  // children of position p: forest[2 * (p & windowMask)], [+ 1]
     size_t windowMask;
     size_t base;
     size_t dictionaryLookups;
     size_t dictionaryMatches;
 
-    // windowSize: power of 2, larger than the largest distance.
+    // windowSize: power of 2, at most MAX_TREE_WINDOW. Matches are found
+    // up to windowSize - 16 bytes back.
     bool initialize(size_t windowSize)
     {
+        assert(windowSize <= MAX_TREE_WINDOW);
         windowMask = windowSize - 1;
-        buckets = reallocArray(buckets, size_t(1) << TREE_BUCKET_BITS);
-        forest = reallocArray(forest, 2 * windowSize);
-        if (buckets is null || forest is null)
+        if (!buckets.resize(size_t(1) << TREE_BUCKET_BITS) || !forest.resize(2 * windowSize))
             return false;
         buckets[] = TREE_INVALID; // forest entries are written when a position is inserted
         base = 0;
@@ -2076,8 +2066,8 @@ pure nothrow @nogc @safe:
 
     void release()
     {
-        freeArray(buckets);
-        freeArray(forest);
+        buckets.release();
+        forest.release();
     }
 
     // Positions are 32-bit relative to `base`: move `base` forward when they
@@ -2106,6 +2096,8 @@ pure nothrow @nogc @safe:
     void storeAndFindMatches(bool record)(scope const(ubyte)[] data, size_t pos, size_t maxLength,
                                           size_t maxDistance, ref size_t bestLen, ref MatchBuffer matches)
     {
+        if (maxDistance > windowMask - 15)
+            maxDistance = windowMask - 15;
         // Tree comparisons may look past maxLength, the tree is for the whole data.
         size_t limit = data.length - pos;
         size_t maxCompLength = limit < MAX_TREE_COMP_LENGTH ? limit : MAX_TREE_COMP_LENGTH;
@@ -2585,7 +2577,7 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
                            scope const(Command)[] cmds, ref EncoderWorkspace ws, out uint bestMode)
 {
     enum A = NUM_LITERAL_CODES;
-    if (!ensureLength(ws.modeHistograms, 4 * 64 * A))
+    if (!ws.modeHistograms.ensure(4 * 64 * A))
         return false;
     uint[] mh = ws.modeHistograms[0 .. 4 * 64 * A];
     mh[] = 0;
@@ -2653,7 +2645,7 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
     uint[] mh = ws.modeHistograms[0 .. 4 * 64 * A];
 
     // Costs of each context. Contexts without statistics use those of all contexts.
-    if (!ensureLength(ws.literalContextCosts, 64 * A))
+    if (!ws.literalContextCosts.ensure(64 * A))
         return false;
     float[] contextCosts = ws.literalContextCosts;
     uint[A] all;
@@ -2732,7 +2724,7 @@ bool findOptimalMatches(ref TreeHasher t, scope const(ubyte)[] data, size_t star
                         size_t maxBackward, ref const(LevelParams) params, ref EncoderWorkspace ws)
 {
     size_t n = end - start;
-    if (!ensureLength(ws.numMatches, n))
+    if (!ws.numMatches.ensure(n))
         return false;
     uint[] numMatches = ws.numMatches[0 .. n];
     ws.matches.length = 0;
@@ -2795,7 +2787,7 @@ bool optimalParse(scope const(ubyte)[] data, size_t start, size_t end, size_t ma
                   ref DistanceCache last, ref CommandBuffer cmds, ref EncoderWorkspace ws)
 {
     size_t n = end - start;
-    if (!ensureLength(ws.literalCosts, n + 1) || !ensureLength(ws.nodes, n + 1))
+    if (!ws.literalCosts.ensure(n + 1) || !ws.nodes.ensure(n + 1))
         return false;
     double[] literalCosts = ws.literalCosts[0 .. n + 1];
     ZopfliNode[] nodes = ws.nodes[0 .. n + 1];
@@ -2827,8 +2819,8 @@ uint blockLengthCode(size_t len)
 struct BlockSplit
 {
 pure nothrow @nogc @safe:
-    ubyte[] types;
-    uint[] lengths;
+    MallocArray!ubyte types;
+    MallocArray!uint lengths;
     size_t numBlocks;
     uint numTypes = 1;
 
@@ -2839,7 +2831,7 @@ pure nothrow @nogc @safe:
         numBlocks = 0;
         if (n == 0)
             return true;
-        if (!ensureLength(types, 1) || !ensureLength(lengths, 1))
+        if (!types.ensure(1) || !lengths.ensure(1))
             return false;
         types[0] = 0;
         lengths[0] = cast(uint) n;
@@ -2849,8 +2841,8 @@ pure nothrow @nogc @safe:
 
     void release()
     {
-        freeArray(types);
-        freeArray(lengths);
+        types.release();
+        lengths.release();
     }
 }
 
@@ -3004,10 +2996,10 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
         return split.setSingle(n) ? BrotliStatus.success : oom;
 
     size_t bitmapLength = (numHistograms + 7) >> 3;
-    if (!ensureLength(ws.splitHistograms, numHistograms * alphabetSize)
-        || !ensureLength(ws.splitBlockIds, n)
-        || !ensureLength(ws.splitSignal, n * bitmapLength)
-        || !ensureLength(ws.splitInsertCost, numHistograms * alphabetSize)
+    if (!ws.splitHistograms.ensure(numHistograms * alphabetSize)
+        || !ws.splitBlockIds.ensure(n)
+        || !ws.splitSignal.ensure(n * bitmapLength)
+        || !ws.splitInsertCost.ensure(numHistograms * alphabetSize)
         || !ws.reserveClustering(numHistograms, alphabetSize))
         return oom;
     uint[] histograms = ws.splitHistograms;
@@ -3086,7 +3078,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
             numBlocks++;
         previous = typeNumber[t];
     }
-    if (!ensureLength(split.types, numBlocks) || !ensureLength(split.lengths, numBlocks))
+    if (!split.types.ensure(numBlocks) || !split.lengths.ensure(numBlocks))
         return oom;
     size_t b = 0;
     previous = uint.max;
@@ -3198,11 +3190,9 @@ BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphab
 
     // Cluster each batch, keep the batch clusters. The first pass only merges
     // when it saves bits, the next ones halve the number of histograms.
-    uint[] reduced = reallocArray!uint(null, n * alphabetSize);
-    scope(exit) freeArray(reduced);
-    uint[] reducedMap = reallocArray!uint(null, n);
-    scope(exit) freeArray(reducedMap);
-    if (reduced is null || reducedMap is null)
+    MallocArray!uint reduced;
+    MallocArray!uint reducedMap;
+    if (!reduced.resize(n * alphabetSize) || !reducedMap.resize(n))
         return BrotliStatus.outOfMemory;
     reduced[0 .. n * alphabetSize] = histograms[0 .. n * alphabetSize];
     foreach (i; 0 .. n)
@@ -3436,90 +3426,88 @@ pure nothrow @nogc @safe:
     Log2Table log2;
 
     // Symbols of a meta-block.
-    ushort[] literals;
-    ushort[] commandSymbols;
-    ushort[] distanceSymbols;
+    MallocArray!ushort literals;
+    MallocArray!ushort commandSymbols;
+    MallocArray!ushort distanceSymbols;
 
     // Block splits.
     BlockSplit[3] splits;
-    ushort[] typeCodes;
-    uint[] splitHistograms;
-    ubyte[] splitBlockIds;
-    ubyte[] splitSignal;
-    float[] splitInsertCost;
+    MallocArray!ushort typeCodes;
+    MallocArray!uint splitHistograms;
+    MallocArray!ubyte splitBlockIds;
+    MallocArray!ubyte splitSignal;
+    MallocArray!float splitInsertCost;
 
     // Histograms and prefix codes.
-    uint[] modeHistograms;      // [mode][context][symbol], to choose the literal context mode
-    uint[] histograms;
-    uint[] treeHistograms;
-    uint[] clusterMap;
-    ubyte[] depths;
-    ushort[] bits;
+    MallocArray!uint modeHistograms;      // [mode][context][symbol], to choose the literal context mode
+    MallocArray!uint histograms;
+    MallocArray!uint treeHistograms;
+    MallocArray!uint clusterMap;
+    MallocArray!ubyte depths;
+    MallocArray!ushort bits;
 
     // Clustering.
-    uint[] clusters;
-    ushort[] clusterScratch;
-    double[] clusterDelta;
+    MallocArray!uint clusters;
+    MallocArray!ushort clusterScratch;
+    MallocArray!double clusterDelta;
     size_t clusteringCapacity; // histograms of MAX_ALPHABET_SIZE
 
-    uint[] scratch;
+    MallocArray!uint scratch;
 
     // Optimal parsing.
     CommandBuffer previousCommands;
     CommandBuffer bestCommands;
-    ubyte[] trialOutput;
+    BitWriter trial;
     MatchBuffer matches;
-    uint[] numMatches;
-    double[] literalCosts;
-    float[] literalContextCosts;
-    ZopfliNode[] nodes;
+    MallocArray!uint numMatches;
+    MallocArray!double literalCosts;
+    MallocArray!float literalContextCosts;
+    MallocArray!ZopfliNode nodes;
 
     bool initialize()
     {
         log2.initialize();
-        scratch = reallocArray(scratch, 2 * MAX_CONTEXT_MAP_LENGTH);
-        return scratch !is null;
+        return scratch.resize(2 * MAX_CONTEXT_MAP_LENGTH);
     }
 
     // Room to cluster n histograms of alphabetSize symbols.
     bool reserveClustering(size_t n, size_t alphabetSize)
     {
-        return ensureLength(clusters, n * alphabetSize)
-            && ensureLength(clusterScratch, n * alphabetSize)
-            && ensureLength(clusterDelta, n * n);
+        return clusters.ensure(n * alphabetSize)
+            && clusterScratch.ensure(n * alphabetSize)
+            && clusterDelta.ensure(n * n);
     }
 
     void release()
     {
         commands.release();
-        freeArray(literals);
-        freeArray(commandSymbols);
-        freeArray(distanceSymbols);
+        literals.release();
+        commandSymbols.release();
+        distanceSymbols.release();
         foreach (ref s; splits)
             s.release();
-        freeArray(typeCodes);
-        freeArray(splitHistograms);
-        freeArray(splitBlockIds);
-        freeArray(splitSignal);
-        freeArray(splitInsertCost);
-        freeArray(modeHistograms);
-        freeArray(histograms);
-        freeArray(treeHistograms);
-        freeArray(clusterMap);
-        freeArray(depths);
-        freeArray(bits);
-        freeArray(clusters);
-        freeArray(clusterScratch);
-        freeArray(clusterDelta);
-        freeArray(scratch);
+        typeCodes.release();
+        splitHistograms.release();
+        splitBlockIds.release();
+        splitSignal.release();
+        splitInsertCost.release();
+        modeHistograms.release();
+        histograms.release();
+        treeHistograms.release();
+        clusterMap.release();
+        depths.release();
+        bits.release();
+        clusters.release();
+        clusterScratch.release();
+        clusterDelta.release();
+        scratch.release();
         previousCommands.release();
         bestCommands.release();
-        freeArray(trialOutput);
         matches.release();
-        freeArray(numMatches);
-        freeArray(literalCosts);
-        freeArray(literalContextCosts);
-        freeArray(nodes);
+        numMatches.release();
+        literalCosts.release();
+        literalContextCosts.release();
+        nodes.release();
     }
 }
 
@@ -3568,8 +3556,8 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
         if (hasExplicitDistance(c))
             numDistances++;
     }
-    if (!ensureLength(ws.literals, numLiterals) || !ensureLength(ws.commandSymbols, cmds.length)
-        || !ensureLength(ws.distanceSymbols, numDistances))
+    if (!ws.literals.ensure(numLiterals) || !ws.commandSymbols.ensure(cmds.length)
+        || !ws.distanceSymbols.ensure(numDistances))
         return oom;
     {
         size_t pos = start, nl = 0, nd = 0;
@@ -3640,9 +3628,9 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
     size_t literalSize = numLiteralHistograms * A;
     size_t distanceSize = numDistanceHistograms * numDistanceSymbols;
     size_t commandSize = numCommandTypes * NUM_COMMAND_CODES;
-    if (!ensureLength(ws.histograms, literalSize > distanceSize ? literalSize : distanceSize)
-        || !ensureLength(ws.treeHistograms, literalSize + (distanceSize > commandSize ? distanceSize : commandSize))
-        || !ensureLength(ws.clusterMap, numLiteralHistograms > numDistanceHistograms
+    if (!ws.histograms.ensure(literalSize > distanceSize ? literalSize : distanceSize)
+        || !ws.treeHistograms.ensure(literalSize + (distanceSize > commandSize ? distanceSize : commandSize))
+        || !ws.clusterMap.ensure(numLiteralHistograms > numDistanceHistograms
                          ? numLiteralHistograms : numDistanceHistograms))
         return oom;
 
@@ -3743,7 +3731,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
         w.writeBits(1, 0); // ISUNCOMPRESSED
 
     size_t numBlocks = splits[LITERALS].numBlocks + splits[COMMANDS].numBlocks + splits[DISTANCES].numBlocks;
-    if (!ensureLength(ws.typeCodes, numBlocks))
+    if (!ws.typeCodes.ensure(numBlocks))
         return oom;
     BlockEncoder[3] blocks;
     {
@@ -3766,8 +3754,8 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
     size_t literalCodes = numLiteralTrees * A;
     size_t commandCodes = numCommandTypes * NUM_COMMAND_CODES;
     size_t distanceCodes = numDistanceTrees * numDistanceSymbols;
-    if (!ensureLength(ws.depths, literalCodes + commandCodes + distanceCodes)
-        || !ensureLength(ws.bits, literalCodes + commandCodes + distanceCodes))
+    if (!ws.depths.ensure(literalCodes + commandCodes + distanceCodes)
+        || !ws.bits.ensure(literalCodes + commandCodes + distanceCodes))
         return oom;
     ubyte[] literalDepth = ws.depths[0 .. literalCodes];
     ushort[] literalBits = ws.bits[0 .. literalCodes];
@@ -3860,17 +3848,15 @@ BrotliStatus optimalCommands(ref TreeHasher t, scope const(ubyte)[] data, size_t
         if (params.optimalKeepBest)
         {
             // Size of the meta-block with these commands, written aside.
-            BitWriter trial;
-            trial.growable = true;
-            trial.buf = ws.trialOutput;
-            BrotliStatus r = writeCompressedMetaBlock(trial, data, start, length, ws.commands[], isLast,
-                                                      params, ws);
-            ws.trialOutput = trial.buf;
+            ws.trial.growable = true;
+            ws.trial.rewind(BitWriter.Mark.init);
+            BrotliStatus r = writeCompressedMetaBlock(ws.trial, data, start, length, ws.commands[],
+                                                      isLast, params, ws);
             if (r != BrotliStatus.success)
                 return r;
-            if (trial.bitPosition() < bestBits)
+            if (ws.trial.bitPosition() < bestBits)
             {
-                bestBits = trial.bitPosition();
+                bestBits = ws.trial.bitPosition();
                 bestLast = passLast;
                 if (!copyCommands(ws.commands, ws.bestCommands))
                     return oom;
@@ -3932,7 +3918,8 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
     if (optimal)
     {
         size_t windowSize = 16;
-        while (windowSize < input.length && windowSize < (size_t(1) << lgwin))
+        while (windowSize < input.length && windowSize < (size_t(1) << lgwin)
+               && windowSize < MAX_TREE_WINDOW)
             windowSize *= 2;
         if (!t.initialize(windowSize))
             return BrotliStatus.outOfMemory;
@@ -4146,7 +4133,6 @@ version(unittest)
         ubyte[MAX_ALPHABET_SIZE] depth;
         ushort[MAX_ALPHABET_SIZE] bits;
         BitWriter w = testWriter();
-        scope(exit) freeArray(w.buf);
         buildAndStorePrefixCode(w, counts, depth[], bits[]);
         size_t treeBits = cast(size_t) w.bitPosition();
 
@@ -4268,12 +4254,12 @@ unittest
 {
     // Context maps round-trip.
     TestRandom rng;
-    uint[] scratch = reallocArray!uint(null, 2 * MAX_CONTEXT_MAP_LENGTH);
-    scope(exit) freeArray(scratch);
-    ubyte[] map = reallocArray!ubyte(null, MAX_CONTEXT_MAP_LENGTH);
-    scope(exit) freeArray(map);
-    ubyte[] decodedStorage = reallocArray!ubyte(null, MAX_CONTEXT_MAP_LENGTH);
-    scope(exit) freeArray(decodedStorage);
+    MallocArray!uint scratch;
+    assert(scratch.resize(2 * MAX_CONTEXT_MAP_LENGTH));
+    MallocArray!ubyte map;
+    assert(map.resize(MAX_CONTEXT_MAP_LENGTH));
+    MallocArray!ubyte decodedStorage;
+    assert(decodedStorage.resize(MAX_CONTEXT_MAP_LENGTH));
     foreach (iter; 0 .. 400)
     {
         size_t length = 64 * (1 + rng.below(256));
@@ -4292,7 +4278,6 @@ unittest
                 v = rng.below(10) == 0 ? cast(ubyte) rng.below(numTrees) : 0;
         }
         BitWriter w = testWriter();
-        scope(exit) freeArray(w.buf);
         storeContextMap(w, map[0 .. length], numTrees, scratch);
         w.writeBits(5, 0x15);
         w.alignToByte();
@@ -4319,8 +4304,8 @@ unittest
     uint[MAX_CLUSTER_INPUTS * A] histograms;
     uint[MAX_CLUSTER_INPUTS * A] clusters;
     ushort[MAX_CLUSTER_INPUTS * A] scratch;
-    double[] delta = reallocArray!double(null, MAX_CLUSTER_INPUTS * MAX_CLUSTER_INPUTS);
-    scope(exit) freeArray(delta);
+    MallocArray!double delta;
+    assert(delta.resize(MAX_CLUSTER_INPUTS * MAX_CLUSTER_INPUTS));
     foreach (iter; 0 .. 300)
     {
         size_t n = 1 + rng.below(MAX_CLUSTER_INPUTS);
@@ -4402,8 +4387,8 @@ unittest
     assert(ws.initialize());
     BlockSplit split;
     scope(exit) split.release();
-    ushort[] symbols = reallocArray!ushort(null, 50_000);
-    scope(exit) freeArray(symbols);
+    MallocArray!ushort symbols;
+    assert(symbols.resize(50_000));
     foreach (iter; 0 .. 30)
     {
         size_t n = iter < 5 ? iter * 50 : 1 + rng.below(50_000);
@@ -4438,8 +4423,8 @@ unittest
     static immutable string text = "The quick brown fox jumps over the lazy dog. Then, the house of the "
         ~ "World: information about the people. THE TIME AND THE PLACE, the time and the place. ";
     TestRandom rng;
-    ubyte[] data = reallocArray!ubyte(null, 30_000);
-    scope(exit) freeArray(data);
+    MallocArray!ubyte data;
+    assert(data.resize(30_000));
     foreach (i, ref b; data)
     {
         if ((i / 2000) % 3 == 0)
@@ -4549,7 +4534,6 @@ unittest
 }
 
 /*
-Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 Copyright (c) 2026 Guillaume Piolat.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

@@ -39,6 +39,9 @@ module brotli.decoder;
 
 import numem.core.hooks : nu_free, nu_malloc, nu_realloc;
 
+version(BigEndian)
+    static assert(0, "brotli: big-endian targets are not supported.");
+
 @safe pure nothrow @nogc:
 
 /// Result of a decompression.
@@ -92,18 +95,10 @@ BrotliStatus brotliDecompressAlloc(const(ubyte)[] input, out ubyte[] output,
     o.growable = true;
     BrotliStatus r = decodeStream(input, o);
     if (r != BrotliStatus.success || o.len == 0)
-    {
-        freeArray(o.buf);
         return r;
-    }
-    if (o.len < o.buf.length)
-    {
-        // Shrink to fit. If that fails, the larger buffer is still fine.
-        ubyte[] shrunk = reallocArray(o.buf, o.len);
-        if (shrunk !is null)
-            o.buf = shrunk;
-    }
-    output = o.buf[0 .. o.len];
+    // Shrink to fit. If that fails, the larger buffer is still fine.
+    o.owned.resize(o.len);
+    output = o.owned.take()[0 .. o.len];
     return r;
 }
 
@@ -123,7 +118,7 @@ private:
 // Resize a malloc'ed array (or allocate one if `arr` is null).
 // On success, `arr` must not be used anymore. On failure, returns null and
 // `arr` is untouched. `count` must be > 0.
-package T[] reallocArray(T)(T[] arr, size_t count) @trusted
+T[] reallocArray(T)(T[] arr, size_t count) @system
 {
     assert(count > 0);
     if (count > size_t.max / T.sizeof)
@@ -135,29 +130,106 @@ package T[] reallocArray(T)(T[] arr, size_t count) @trusted
     return (cast(T*)p)[0 .. count];
 }
 
-package void freeArray(T)(ref T[] arr) @trusted
+// `arr` must be malloc'ed, or null.
+void freeArray(T)(ref T[] arr) @system
 {
     if (arr.ptr !is null)
         nu_free(arr.ptr);
     arr = null;
 }
 
-// Grow-only array, its content is not preserved.
-package bool ensureLength(T)(ref T[] arr, size_t count)
+// A malloc'ed array, freed by its destructor. It can't be copied, and its
+// memory is only reachable through it, which makes it safe to use.
+// Resizing moves the elements: a slice of it must not be used after that.
+package struct MallocArray(T)
 {
-    if (arr.length >= count)
+pure nothrow @nogc @safe:
+    private T[] data;
+
+    @disable this(this);
+
+    ~this()
+    {
+        release();
+    }
+
+    // The elements, until the next resize or release.
+    inout(T)[] opSlice() inout return
+    {
+        return data;
+    }
+
+    alias opSlice this;
+
+    inout(T)[] opSlice(size_t a, size_t b) inout return
+    {
+        return data[a .. b];
+    }
+
+    size_t opDollar() const
+    {
+        return data.length;
+    }
+
+    void opSliceAssign(T value)
+    {
+        data[] = value;
+    }
+
+    void opSliceAssign(T value, size_t a, size_t b)
+    {
+        data[a .. b] = value;
+    }
+
+    void opSliceAssign(scope const(T)[] values, size_t a, size_t b)
+    {
+        data[a .. b] = values[];
+    }
+
+    // Make it at least `count` long, keep the elements. False if out of
+    // memory, then it is unchanged.
+    bool ensure(size_t count)
+    {
+        if (data.length >= count)
+            return true;
+        return resize(count);
+    }
+
+    // Make it `count` long, keep the elements that fit. False if out of
+    // memory, then it is unchanged.
+    bool resize(size_t count) @trusted
+    {
+        if (count == 0)
+        {
+            release();
+            return true;
+        }
+        T[] r = reallocArray(data, count);
+        if (r is null)
+            return false;
+        data = r;
         return true;
-    T[] bigger = reallocArray(arr, count);
-    if (bigger is null)
-        return false;
-    arr = bigger;
-    return true;
+    }
+
+    void release() @trusted
+    {
+        freeArray(data);
+    }
+
+    // Give the memory to the caller, who will free it with nu_free.
+    T[] take()
+    {
+        T[] r = data;
+        data = null;
+        return r;
+    }
 }
 
 struct OutputBuffer
 {
 pure nothrow @nogc @safe:
-    ubyte[] buf;    // Caller's buffer, or malloc'ed if `growable`.
+    ubyte[] buf;    // Caller's buffer, or `owned` if `growable`.
+    MallocArray!ubyte owned;
     size_t len;     // Bytes decoded so far, always <= buf.length and <= limit.
     size_t limit;   // Maximum decoded size.
     bool growable;
@@ -185,13 +257,12 @@ pure nothrow @nogc @safe:
             cap = (cap > size_t.max / 2) ? need : cap * 2;
         if (cap > limit)
             cap = limit;
-        ubyte[] bigger = reallocArray(buf, cap);
-        if (bigger is null)
+        if (!owned.resize(cap))
         {
             error = BrotliStatus.outOfMemory;
             return false;
         }
-        buf = bigger;
+        buf = owned[];
         return true;
     }
 }
@@ -982,21 +1053,11 @@ bool readBlockSwitch(ref BitReader br, ref BlockCategory cat)
 // Memory reused across meta-blocks.
 struct Workspace
 {
-pure nothrow @nogc @safe:
-    uint[] literalTables;
-    uint[] commandTables;
-    uint[] distanceTables;
-    ubyte[] literalContextMap;
-    ubyte[] distanceContextMap;
-
-    void release()
-    {
-        freeArray(literalTables);
-        freeArray(commandTables);
-        freeArray(distanceTables);
-        freeArray(literalContextMap);
-        freeArray(distanceContextMap);
-    }
+    MallocArray!uint literalTables;
+    MallocArray!uint commandTables;
+    MallocArray!uint distanceTables;
+    MallocArray!ubyte literalContextMap;
+    MallocArray!ubyte distanceContextMap;
 }
 
 // State kept across meta-blocks.
@@ -1024,10 +1085,10 @@ pure nothrow @nogc @safe:
 
 // Read `count` prefix codes into `storage`.
 BrotliStatus readTableGroup(ref BitReader br, uint alphabetSize, uint count,
-                            ref uint[] storage, out TableGroup group)
+                            ref MallocArray!uint storage, out TableGroup group)
 {
     size_t stride = maxHuffmanTableSize(alphabetSize);
-    if (!ensureLength(storage, stride * count))
+    if (!storage.ensure(stride * count))
         return BrotliStatus.outOfMemory;
     foreach (i; 0 .. count)
         if (!readPrefixCode(br, alphabetSize, storage[i * stride .. (i + 1) * stride]))
@@ -1070,14 +1131,14 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
 
     uint numLiteralTrees, numDistanceTrees;
     size_t literalMapSize = cats[0].numTypes * 64;
-    if (!ensureLength(ws.literalContextMap, literalMapSize))
+    if (!ws.literalContextMap.ensure(literalMapSize))
         return oom;
     ubyte[] literalMap = ws.literalContextMap[0 .. literalMapSize];
     if (!decodeContextMap(br, literalMap, numLiteralTrees))
         return corrupted;
 
     size_t distanceMapSize = cats[2].numTypes * 4;
-    if (!ensureLength(ws.distanceContextMap, distanceMapSize))
+    if (!ws.distanceContextMap.ensure(distanceMapSize))
         return oom;
     ubyte[] distanceMap = ws.distanceContextMap[0 .. distanceMapSize];
     if (!decodeContextMap(br, distanceMap, numDistanceTrees))
@@ -1302,7 +1363,6 @@ BrotliStatus decodeStream(const(ubyte)[] input, ref OutputBuffer o)
     br.data = input;
 
     Workspace ws;
-    scope(exit) ws.release();
 
     // Stream header: window size.
     uint windowBits;
