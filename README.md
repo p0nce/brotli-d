@@ -2,7 +2,8 @@
 
 Tiny, self-contained [Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder for D.
 
-- Single file: `source/brotli.d` (the 122 KB static dictionary is embedded).
+- `source/brotli/decoder.d` (the 122 KB static dictionary is embedded), `source/brotli/encoder.d`
+  (work in progress, see `TODO.txt`); `import brotli;` imports both.
 - `@safe pure nothrow @nogc`. Only dependency is [numem](https://github.com/Inochi2D/numem),
   for its pure `nu_malloc`/`nu_realloc`/`nu_free` (libc by default). Works with `-betterC`.
 - One-shot decoding, memory to memory.
@@ -45,7 +46,7 @@ by trailing bytes), `outputTooSmall`, `outOfMemory`.
 ## Testing
 
 ```
-dmd -of=tester -I<numem>/source test/tester.d source/brotli.d <numem>/source/numem/core/hooks.d
+dmd -of=tester -I<numem>/source -I<godot-math>/source -Isource test/tester.d source/brotli/*.d <numem>/source/numem/core/hooks.d <godot-math>/source/godotmath.d
 ./tester check test/suite.bin test/suite.txt
 ```
 
