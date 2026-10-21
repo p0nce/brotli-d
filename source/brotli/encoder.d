@@ -1387,22 +1387,23 @@ struct LevelParams
     ushort optimalMaxLength; // longer copies are only tried at their full length
     ubyte optimalStarts;    // positions tried for the start of each insert
     bool optimalKeepBest;   // keep the pass that compresses best, else the last
+    bool clusterLiteralsByContext; // cheaper literal clustering when there are many histograms
 }
 
 static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
 [
-    LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false), // 0
-    LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false), // 1
-    LevelParams(15, 1,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false), // 2
-    LevelParams(15, 2,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false), // 3
-    LevelParams(15, 3,  4, true,   64, true, false, true, 0, 0, true, 0, 0, 0, false), // 4
-    LevelParams(15, 4,  4, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false), // 5
-    LevelParams(15, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false), // 6
-    LevelParams(16, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false), // 7
-    LevelParams(16, 6, 16, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false), // 8
-    LevelParams(16, 6, 16, true,  512, true, true, true, 1, 2, true, 0, 0, 0, false), // 9
-    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 2, 150, 1, false), // 10
-    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 4, 325, 5, true), // 11
+    LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 0
+    LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 1
+    LevelParams(15, 1,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false), // 2
+    LevelParams(15, 2,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false), // 3
+    LevelParams(15, 3,  4, true,   64, true, false, true, 0, 0, true, 0, 0, 0, false, false), // 4
+    LevelParams(15, 4,  4, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 5
+    LevelParams(15, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 6
+    LevelParams(16, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 7
+    LevelParams(16, 6, 16, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 8
+    LevelParams(16, 6, 16, true,  512, true, true, true, 1, 2, true, 0, 0, 0, false, true), // 9
+    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 2, 150, 1, false, false), // 10
+    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 4, 325, 5, true, false), // 11
 ];
 
 // Hash table of recent positions, by hash of their next 4 bytes.
@@ -2683,6 +2684,7 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
         return false;
     uint[] mh = ws.modeHistograms[0 .. 4 * 64 * A];
     mh[] = 0;
+    uint[4 * 64] totals; // literals in each histogram
 
     void count(size_t from, size_t to)
     {
@@ -2692,8 +2694,9 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
         {
             foreach (mode; 0 .. 4)
             {
-                uint context = kContextLookupTables[mode * 2][p1] | kContextLookupTables[mode * 2 + 1][p2];
-                mh[(mode * 64 + context) * A + b]++;
+                uint k = mode * 64 + (kContextLookupTables[mode * 2][p1] | kContextLookupTables[mode * 2 + 1][p2]);
+                mh[k * A + b]++;
+                totals[k]++;
             }
             p2 = p1;
             p1 = b;
@@ -2718,9 +2721,9 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
         ulong estimate = 0;
         foreach (context; 0 .. 64)
         {
-            const(uint)[] h = mh[(mode * 64 + context) * A .. (mode * 64 + context + 1) * A];
-            if (!isEmpty(h))
-                estimate += populationCost(h);
+            size_t k = mode * 64 + context;
+            if (totals[k] != 0)
+                estimate += populationCost(mh[k * A .. (k + 1) * A]);
         }
         if (estimate < best)
         {
@@ -3544,6 +3547,8 @@ pure nothrow @nogc @safe:
     MallocArray!uint histograms;
     MallocArray!uint treeHistograms;
     MallocArray!uint clusterMap;
+    MallocArray!uint contextHistograms;
+    MallocArray!uint typeHistograms;
     MallocArray!ubyte depths;
     MallocArray!ushort bits;
 
@@ -3632,6 +3637,57 @@ void storeTrees(ref BitWriter w, scope uint[] histograms, size_t numTrees, size_
             optimizeHistogramForRle(h);
         buildAndStorePrefixCode(w, h, depths[o .. o + alphabetSize], bits[o .. o + alphabetSize]);
     }
+}
+
+// Literal trees from the histograms of each (block type, context), cheaper
+// than clustering all of them: the 64 contexts are clustered for all the
+// block types together, then for each cluster of contexts, the block types
+// are clustered. Writes the tree of each (block type, context) to `map`,
+// the trees to `trees`.
+BrotliStatus clusterLiteralsByContext(scope const(uint)[] histograms, uint numTypes, scope ubyte[] map,
+                                      scope uint[] trees, ref EncoderWorkspace ws, out uint numTrees,
+                                      out ulong totalCost)
+{
+    enum A = NUM_LITERAL_CODES;
+    if (!ws.reserveClustering(64 > numTypes ? 64 : numTypes, A)
+        || !ws.contextHistograms.ensure(64 * A) || !ws.typeHistograms.ensure(numTypes * A))
+        return BrotliStatus.outOfMemory;
+
+    // Clusters of contexts.
+    uint[] contexts = ws.contextHistograms[0 .. 64 * A];
+    contexts[] = 0;
+    foreach (t; 0 .. numTypes)
+        foreach (k; 0 .. 64 * A)
+            contexts[k] += histograms[t * 64 * A + k];
+    ubyte[64] contextCluster;
+    ulong cost;
+    uint numContextClusters = clusterHistograms(contexts, 64, A, 64, contextCluster[], ws.clusters,
+                                                ws.clusterScratch, ws.clusterDelta, cost);
+
+    // For each cluster of contexts, the histograms of the block types, clustered.
+    uint maxTrees = 256 / numContextClusters;
+    uint[] byType = ws.typeHistograms[0 .. numTypes * A];
+    numTrees = 0;
+    totalCost = 0;
+    foreach (j; 0 .. numContextClusters)
+    {
+        byType[] = 0;
+        foreach (t; 0 .. numTypes)
+            foreach (context; 0 .. 64)
+                if (contextCluster[context] == j)
+                    byType[t * A .. (t + 1) * A] += histograms[(t * 64 + context) * A .. (t * 64 + context + 1) * A];
+        ubyte[256] typeTree;
+        uint n = clusterHistograms(byType, numTypes, A, maxTrees, typeTree[],
+                                   ws.clusters, ws.clusterScratch, ws.clusterDelta, cost);
+        trees[numTrees * A .. (numTrees + n) * A] = ws.clusters[0 .. n * A];
+        foreach (t; 0 .. numTypes)
+            foreach (context; 0 .. 64)
+                if (contextCluster[context] == j)
+                    map[t * 64 + context] = cast(ubyte)(numTrees + typeTree[t]);
+        numTrees += n;
+        totalCost += cost;
+    }
+    return BrotliStatus.success;
 }
 
 // Write data[start .. start + length] as a compressed meta-block made of `cmds`.
@@ -3729,7 +3785,8 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
     size_t distanceSize = numDistanceHistograms * numDistanceSymbols;
     size_t commandSize = numCommandTypes * NUM_COMMAND_CODES;
     if (!ws.histograms.ensure(literalSize > distanceSize ? literalSize : distanceSize)
-        || !ws.treeHistograms.ensure(literalSize + (distanceSize > commandSize ? distanceSize : commandSize))
+        || !ws.treeHistograms.ensure(literalSize + (distanceSize > commandSize ? distanceSize : commandSize)
+                                     + literalSize)
         || !ws.clusterMap.ensure(numLiteralHistograms > numDistanceHistograms
                          ? numLiteralHistograms : numDistanceHistograms))
         return oom;
@@ -3767,6 +3824,40 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
             }
             uint numTrees;
             ulong cost;
+            // Clustering all the histograms costs about (number of histograms) x
+            // (their non-zero symbols): too slow for many dense histograms.
+            bool byContext = false;
+            if (params.clusterLiteralsByContext)
+            {
+                size_t used = 0;
+                size_t nonZero = 0;
+                foreach (k; 0 .. numLiteralHistograms)
+                {
+                    size_t nz = 0;
+                    foreach (c; h[k * A .. (k + 1) * A])
+                        nz += c != 0;
+                    nonZero += nz;
+                    used += nz != 0;
+                }
+                byContext = numLiteralHistograms > MAX_CLUSTER_INPUTS || used * nonZero > (1 << 22);
+            }
+            if (byContext)
+            {
+                ubyte[256 * 64] map;
+                uint[] trees = ws.treeHistograms[literalSize .. 2 * literalSize];
+                BrotliStatus r = clusterLiteralsByContext(h, numLiteralTypes, map[], trees, ws, numTrees, cost);
+                if (r != BrotliStatus.success)
+                    return r;
+                if (cost < bestCost)
+                {
+                    bestCost = cost;
+                    contextMode = mode;
+                    numLiteralTrees = numTrees;
+                    literalMap[0 .. numLiteralHistograms] = map[0 .. numLiteralHistograms];
+                    literalTrees[0 .. numTrees * A] = trees[0 .. numTrees * A];
+                }
+                continue;
+            }
             BrotliStatus r = clusterMany(h, numLiteralHistograms, A, 256, ws.clusterMap, ws,
                                          numTrees, cost);
             if (r != BrotliStatus.success)

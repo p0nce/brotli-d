@@ -29,6 +29,11 @@ on the edge-case corpus (encode_test.py). The full suite (all windows,
 
 2. Speed pass
 -------------
+Rule for keeping a speed change: at least this speed gain per +1% of size
+(speedups that don't lose size always qualify):
+    levels 0-3: 5%    levels 4-6: 15%    levels 7-9: 50%    level 10: 200%
+    level 11: no trade-off, only size-neutral speedups (and size gains).
+
 Profile first, per phase, on: text, C source, maps, qoi, 5 KB, 50 bytes.
 Targets: level 6 at the speed of q6 or better, level 11 >= 1 MB/s.
 
