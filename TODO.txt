@@ -29,10 +29,15 @@ on the edge-case corpus (encode_test.py). The full suite (all windows,
 
 2. Speed pass
 -------------
-Rule for keeping a speed change: at least this speed gain per +1% of size
-(speedups that don't lose size always qualify):
+Rules:
+- Keep a speed change if it gains at least this much speed per +1% of size
+  (speedups that don't lose size always qualify):
     levels 0-3: 5%    levels 4-6: 15%    levels 7-9: 50%    level 10: 200%
-    level 11: no trade-off, only size-neutral speedups (and size gains).
+    level 11: 1000%, or a major simplification of the encoder.
+- One speed change per commit, measured on its own: each can be tuned or
+  reverted separately.
+- Tuning constants are marked @tuning (UDA). The last pass tunes each of
+  them, one by one.
 
 Profile first, per phase, on: text, C source, maps, qoi, 5 KB, 50 bytes.
 Targets: level 6 at the speed of q6 or better, level 11 >= 1 MB/s.
@@ -82,7 +87,11 @@ After each change: unit tests, quick suite, ratio unchanged unless intended.
 [ ] Check -betterC build, and that everything stays @safe pure nothrow @nogc.
 
 
-5. Finish
+5. Tuning pass
+--------------
+[ ] Tune each @tuning constant, one by one, on the corpora, per level.
+
+6. Finish
 ---------
 [ ] README: encoder API, levels, window, memory use per level (levels
     10-11: ~8 bytes per window byte), speed and ratio table vs reference,

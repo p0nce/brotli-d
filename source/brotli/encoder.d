@@ -128,6 +128,10 @@ BrotliStatus brotliCompressAlloc(const(ubyte)[] input, out ubyte[] output,
 
 private:
 
+// Marks the constants that tune the encoder (as opposed to format constants):
+// the speed / compression trade-offs worth revisiting.
+struct tuning {}
+
 // ---------------------------------------------------------------------------
 // Encoder: bit writer
 // ---------------------------------------------------------------------------
@@ -1341,10 +1345,24 @@ size_t matchLength(scope const(ubyte)[] data, size_t a, size_t b, size_t limit) 
 }
 
 // Heuristic match scores, in 1/135 of literal bytes (same as the reference encoder).
-enum LITERAL_BYTE_SCORE = 135;
-enum DISTANCE_BIT_PENALTY = 30;
+@tuning enum LITERAL_BYTE_SCORE = 135;
+@tuning enum DISTANCE_BIT_PENALTY = 30;
 enum SCORE_BASE = DISTANCE_BIT_PENALTY * 8 * 8;
-enum MIN_SCORE = SCORE_BASE + 100;
+@tuning enum MIN_SCORE_MARGIN = 100;   // a match must score more than SCORE_BASE + this
+enum MIN_SCORE = SCORE_BASE + MIN_SCORE_MARGIN;
+@tuning enum LAST_DISTANCE_BONUS = 15;
+@tuning enum SHORT_CODE_PENALTY = 39;  // plus 0 to 14, depending on the short code
+@tuning enum LAZY_MATCH_MARGIN = 175;  // a match one byte later must score that much more
+@tuning enum DICTIONARY_THROTTLE_SHIFT = 7; // stop looking up the dictionary below 1 hit in 2^this lookups
+
+// Incompressible data: after a while without matches, look for matches
+// every NEAR_STEP bytes, NEAR_JUMP bytes at a time; and after
+// FAR_FACTOR * randomWindow more, every FAR_STEP bytes, FAR_JUMP at a time.
+@tuning enum SKIP_NEAR_STEP = 2;
+@tuning enum SKIP_NEAR_JUMP = 8;
+@tuning enum SKIP_FAR_STEP = 4;
+@tuning enum SKIP_FAR_JUMP = 16;
+@tuning enum SKIP_FAR_FACTOR = 4;
 
 pragma(inline, true)
 size_t backwardReferenceScore(size_t len, size_t distance)
@@ -1355,9 +1373,9 @@ size_t backwardReferenceScore(size_t len, size_t distance)
 pragma(inline, true)
 size_t lastDistanceScore(size_t len, uint shortCode)
 {
-    size_t score = LITERAL_BYTE_SCORE * len + SCORE_BASE + 15;
+    size_t score = LITERAL_BYTE_SCORE * len + SCORE_BASE + LAST_DISTANCE_BONUS;
     if (shortCode != 0)
-        score -= 39 + ((0x1CA10 >> (shortCode & 0xE)) & 0xE);
+        score -= SHORT_CODE_PENALTY + ((0x1CA10 >> (shortCode & 0xE)) & 0xE);
     return score;
 }
 
@@ -1390,7 +1408,7 @@ struct LevelParams
     bool clusterLiteralsByContext; // cheaper literal clustering when there are many histograms
 }
 
-static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
+@tuning static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
 [
     LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 0
     LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 1
@@ -1534,7 +1552,7 @@ void findLongestMatch(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_
     // Static dictionary, if nothing was found. Stop looking when it rarely
     // finds anything.
     if (params.useDictionary && m.score == MIN_SCORE
-        && h.dictionaryMatches >= (h.dictionaryLookups >> 7))
+        && h.dictionaryMatches >= (h.dictionaryLookups >> DICTIONARY_THROTTLE_SHIFT))
     {
         h.dictionaryLookups++;
         if (findDictionaryMatch(data, pos, maxLength, maxDistance, m))
@@ -1575,7 +1593,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
                     findLongestMatch(h, data, pos + 1, maxLength - 1, maxDistance2, shortDistances,
                                      params, m2);
                     stored = pos + 2;
-                    if (m2.score < m.score + 175)
+                    if (m2.score < m.score + LAZY_MATCH_MARGIN)
                         break;
                     pos++;
                     insert++;
@@ -1617,22 +1635,22 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
             if (pos > applyRandomHeuristics)
             {
                 size_t margin = 4;
-                if (pos > applyRandomHeuristics + 4 * params.randomWindow)
+                if (pos > applyRandomHeuristics + SKIP_FAR_FACTOR * params.randomWindow)
                 {
-                    size_t jump = (pos + 16 < end - margin) ? pos + 16 : end - margin;
-                    for (; pos < jump; pos += 4)
+                    size_t jump = (pos + SKIP_FAR_JUMP < end - margin) ? pos + SKIP_FAR_JUMP : end - margin;
+                    for (; pos < jump; pos += SKIP_FAR_STEP)
                     {
                         h.store(data, pos);
-                        insert += 4;
+                        insert += SKIP_FAR_STEP;
                     }
                 }
                 else
                 {
-                    size_t jump = (pos + 8 < end - margin) ? pos + 8 : end - margin;
-                    for (; pos < jump; pos += 2)
+                    size_t jump = (pos + SKIP_NEAR_JUMP < end - margin) ? pos + SKIP_NEAR_JUMP : end - margin;
+                    for (; pos < jump; pos += SKIP_NEAR_STEP)
                     {
                         h.store(data, pos);
-                        insert += 2;
+                        insert += SKIP_NEAR_STEP;
                     }
                 }
             }
@@ -1798,6 +1816,15 @@ ulong bitsEntropy(scope const(uint)[] h)
     return bits < minimum ? minimum : bits;
 }
 
+// Estimated sizes of prefix codes in bits: simple codes of 1 to 4 symbols,
+// complex codes (plus the entropy of their code lengths).
+@tuning enum ulong ONE_SYMBOL_CODE_BITS = 12;
+@tuning enum ulong TWO_SYMBOLS_CODE_BITS = 20;
+@tuning enum ulong THREE_SYMBOLS_CODE_BITS = 28;
+@tuning enum ulong FOUR_SYMBOLS_CODE_BITS = 37;
+@tuning enum ulong COMPLEX_CODE_BITS = 18;
+@tuning enum ulong COMPLEX_CODE_BITS_PER_DEPTH = 2; // per bit of the longest code
+
 // Estimated size of symbols coded with a prefix code, including the
 // prefix code itself (same model as the reference encoder). The non-zero
 // counts are given in increasing symbol order, with `add`.
@@ -1858,21 +1885,17 @@ pure nothrow @nogc @safe:
 
     ulong result()
     {
-        enum ulong oneSymbolCost = 12;
-        enum ulong twoSymbolsCost = 20;
-        enum ulong threeSymbolsCost = 28;
-        enum ulong fourSymbolsCost = 37;
         alias s = firstCounts;
         if (count <= 1)
-            return oneSymbolCost * COST_ONE_BIT;
+            return ONE_SYMBOL_CODE_BITS * COST_ONE_BIT;
         if (count == 2)
-            return (twoSymbolsCost + s[0] + s[1]) * COST_ONE_BIT;
+            return (TWO_SYMBOLS_CODE_BITS + s[0] + s[1]) * COST_ONE_BIT;
         if (count == 3)
         {
             ulong max = s[0] > s[1] ? s[0] : s[1];
             if (s[2] > max)
                 max = s[2];
-            return (threeSymbolsCost + 2 * (cast(ulong) s[0] + s[1] + s[2]) - max) * COST_ONE_BIT;
+            return (THREE_SYMBOLS_CODE_BITS + 2 * (cast(ulong) s[0] + s[1] + s[2]) - max) * COST_ONE_BIT;
         }
         if (count == 4)
         {
@@ -1886,9 +1909,10 @@ pure nothrow @nogc @safe:
                 }
             ulong h23 = cast(ulong) s[2] + s[3];
             ulong max = h23 > s[0] ? h23 : s[0];
-            return (fourSymbolsCost + 3 * h23 + 2 * (cast(ulong) s[0] + s[1]) - max) * COST_ONE_BIT;
+            return (FOUR_SYMBOLS_CODE_BITS + 3 * h23 + 2 * (cast(ulong) s[0] + s[1]) - max) * COST_ONE_BIT;
         }
-        return bits + (18 + 2 * maxDepth) * COST_ONE_BIT + bitsEntropy(depthHistogram[]);
+        return bits + (COMPLEX_CODE_BITS + COMPLEX_CODE_BITS_PER_DEPTH * maxDepth) * COST_ONE_BIT
+             + bitsEntropy(depthHistogram[]);
     }
 }
 
@@ -2133,11 +2157,22 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 // Binary tree match finder: a binary search tree of the window positions
 // with the same 4-byte hash, sorted by the data that follows them. Finds
 // every match length at a position, with the smallest distance found for it.
-enum TREE_BUCKET_BITS = 17;
+@tuning enum TREE_BUCKET_BITS = 17;
 // The trees cover at most that much history: 8 bytes of memory per byte.
-enum MAX_TREE_WINDOW = 1 << 22;
-enum MAX_TREE_SEARCH_DEPTH = 64;
-enum MAX_TREE_COMP_LENGTH = 128;
+@tuning enum MAX_TREE_WINDOW = 1 << 22;
+@tuning enum MAX_TREE_SEARCH_DEPTH = 64;
+@tuning enum MAX_TREE_COMP_LENGTH = 128;
+@tuning enum SHORT_MATCH_SEARCH_DISTANCE = 64; // for matches of 2 and 3 bytes
+@tuning enum MISSING_SYMBOL_EXTRA_BITS = 2; // cost of an absent symbol, above the rarest
+@tuning enum INITIAL_COMMAND_COST_OFFSET = 11; // first pass: symbol i costs log2(this + i)
+@tuning enum INITIAL_DISTANCE_COST_OFFSET = 20;
+@tuning enum OPTIMAL_MATCH_STARTS = 2; // starts tried with all the matches, the others only with short codes
+@tuning enum long START_MAX_COST_DIFF = 0; // command ends worse than literals don't start inserts
+@tuning enum LONG_COPY_QUICK_STEP = 16384; // skip the parse inside copies at least that long
+// Literal costs after the first pass: weighted average of the costs with
+// and without contexts.
+@tuning enum uint LITERAL_CONTEXT_WEIGHT = 1;
+@tuning enum uint LITERAL_ORDER0_WEIGHT = 1;
 enum uint TREE_INVALID = uint.max;
 
 struct TreeHasher
@@ -2279,7 +2314,7 @@ void findAllMatches(ref TreeHasher t, scope const(ubyte)[] data, size_t pos, siz
     size_t bestLen = 1;
 
     // Short distances, for lengths 2 and 3 that the tree doesn't find.
-    size_t stop = pos > 64 ? pos - 64 : 0;
+    size_t stop = pos > SHORT_MATCH_SEARCH_DISTANCE ? pos - SHORT_MATCH_SEARCH_DISTANCE : 0;
     for (size_t prev = pos - 1; prev > stop && bestLen <= 2; --prev)
     {
         size_t backward = pos - prev;
@@ -2301,7 +2336,7 @@ void findAllMatches(ref TreeHasher t, scope const(ubyte)[] data, size_t pos, siz
 
     // Dictionary words that produce more than that.
     if (!params.useDictionary || bestLen >= MAX_TRANSFORMED_WORD_LENGTH || maxLength < 4
-        || t.dictionaryMatches < (t.dictionaryLookups >> 7))
+        || t.dictionaryMatches < (t.dictionaryLookups >> DICTIONARY_THROTTLE_SHIFT))
         return;
     t.dictionaryLookups++;
     DictionaryReferences refs;
@@ -2346,7 +2381,7 @@ void setCosts(scope const(uint)[] histogram, scope uint[] cost, bool literals)
             missing++;
     }
     uint log2Sum = log2Fixed(sum);
-    uint missingCost = log2Fixed(literals ? sum : sum + missing) + 2 * COST_ONE_BIT;
+    uint missingCost = log2Fixed(literals ? sum : sum + missing) + MISSING_SYMBOL_EXTRA_BITS * COST_ONE_BIT;
     foreach (i, c; histogram)
     {
         if (c == 0)
@@ -2442,7 +2477,6 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                         scope const(long)[] literalCosts, ref const(LevelParams) params,
                         scope ZopfliNode[] nodes)
 {
-    enum LONG_COPY_QUICK_STEP = 16384;
     size_t n = end - start;
     size_t maxZopfliLen = params.optimalMaxLength;
     size_t maxStarts = params.optimalStarts;
@@ -2466,7 +2500,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
             if (i != 0)
                 computeNodeCache(nodes, i, start, maxBackward);
             long costDiff = nodes[i].cost - literalCosts[i];
-            if (costDiff <= 0 || i == 0)
+            if (costDiff <= START_MAX_COST_DIFF || i == 0)
                 queue.push(StartPosition(i, costDiff));
         }
 
@@ -2550,8 +2584,8 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     bestLen = len;
                 }
 
-                // Other matches, from the 2 best starts only.
-                if (k >= 2)
+                // Other matches, from the best starts only.
+                if (k >= OPTIMAL_MATCH_STARTS)
                     continue;
                 size_t len = minLen;
                 foreach (ref const m; here)
@@ -2593,7 +2627,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                 {
                     computeNodeCache(nodes, i, start, maxBackward);
                     long costDiff = nodes[i].cost - literalCosts[i];
-                    if (costDiff <= 0)
+                    if (costDiff <= START_MAX_COST_DIFF)
                         queue.push(StartPosition(i, costDiff));
                 }
                 i++;
@@ -2768,7 +2802,8 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
         {
             setCosts(h, c, true);
             foreach (k; 0 .. A)
-                c[k] = (c[k] + allCosts[k]) / 2;
+                c[k] = (LITERAL_CONTEXT_WEIGHT * c[k] + LITERAL_ORDER0_WEIGHT * allCosts[k])
+                     / (LITERAL_CONTEXT_WEIGHT + LITERAL_ORDER0_WEIGHT);
         }
     }
 
@@ -2792,9 +2827,9 @@ void computeCommandCosts(scope const(Command)[] cmds, ref ZopfliCostModel model)
     if (cmds.length == 0)
     {
         foreach (i, ref c; model.commandCost)
-            c = log2Fixed(11 + i);
+            c = log2Fixed(INITIAL_COMMAND_COST_OFFSET + i);
         foreach (i, ref c; model.distanceCost)
-            c = log2Fixed(20 + i);
+            c = log2Fixed(INITIAL_DISTANCE_COST_OFFSET + i);
     }
     else
     {
@@ -2996,7 +3031,16 @@ struct SplitParams
     uint iterations;
 }
 
-static immutable SplitParams[2][3] kSplitParams =
+@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 2; // cost of a symbol absent from a histogram, above log2(total)
+// Switches are cheaper at the beginning, where histograms are less reliable:
+// from START% of the switch cost, + SLOPE% each WARMUP symbols, until WARMUP.
+@tuning enum SPLIT_WARMUP = 2000;
+@tuning enum SPLIT_WARMUP_START = 77;
+@tuning enum SPLIT_WARMUP_SLOPE = 7;
+@tuning enum SPLIT_REFINE_FACTOR = 2;  // random samples: this * n / stride + SPLIT_REFINE_MIN
+@tuning enum SPLIT_REFINE_MIN = 100;
+
+@tuning static immutable SplitParams[2][3] kSplitParams =
 [
     // Literals, commands, distances: [fast, best]. Switch costs: 28.1, 13.5, 14.6 bits.
     [SplitParams(16, 544, 70, 128, 1841562, 2), SplitParams(100, 544, 70, 128, 1841562, 10)],
@@ -3035,7 +3079,7 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
             total += c;
         uint log2Total = log2Fixed(cast(size_t) total);
         foreach (s, c; h)
-            insertCost[s * numHistograms + k] = c == 0 ? log2Total + 2 * COST_ONE_BIT
+            insertCost[s * numHistograms + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_ONE_BIT
                                                         : log2Total - log2Fixed(c);
     }
 
@@ -3060,10 +3104,10 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
             }
         }
         blockIds[i] = cast(ubyte) best;
-        // Switches are cheaper at the beginning, histograms are less reliable there.
         uint sc = switchCost;
-        if (i < 2000)
-            sc = cast(uint)(cast(ulong) switchCost * (77 * 2000 + 7 * i) / (100 * 2000));
+        if (i < SPLIT_WARMUP)
+            sc = cast(uint)(cast(ulong) switchCost * (SPLIT_WARMUP_START * SPLIT_WARMUP + SPLIT_WARMUP_SLOPE * i)
+                            / (100 * SPLIT_WARMUP));
         ubyte[] signal = switchSignal[i * bitmapLength .. (i + 1) * bitmapLength];
         foreach (k; 0 .. numHistograms)
         {
@@ -3125,7 +3169,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
         foreach (s; symbols[pos .. end])
             histograms[k * alphabetSize + s]++;
     }
-    size_t refinements = 2 * n / p.stride + 100;
+    size_t refinements = SPLIT_REFINE_FACTOR * n / p.stride + SPLIT_REFINE_MIN;
     refinements = (refinements + numHistograms - 1) / numHistograms * numHistograms;
     foreach (r; 0 .. refinements)
     {
@@ -3272,6 +3316,8 @@ pure nothrow @nogc @safe:
     }
 }
 
+@tuning enum CLUSTER_BATCH = 64; // clusterMany clusters histograms by batches of that many
+
 // Like clusterHistograms, for any number of histograms (`map` has a uint per
 // histogram): clusters batches of them first. The cluster histograms are
 // written to ws.clusters.
@@ -3280,7 +3326,7 @@ BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphab
                          out uint numClusters, out ulong totalCost)
 {
     assert(n >= 1 && maxClusters <= MAX_CLUSTER_INPUTS);
-    enum batch = 64;
+    enum batch = CLUSTER_BATCH;
     if (!ws.reserveClustering(n < MAX_CLUSTER_INPUTS ? n : MAX_CLUSTER_INPUTS, alphabetSize))
         return BrotliStatus.outOfMemory;
     if (n <= MAX_CLUSTER_INPUTS)
@@ -3375,6 +3421,8 @@ void writeUncompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] block)
     w.writeBytes(block);
 }
 
+@tuning enum size_t RLE_STREAK_LIMIT = 1240; // optimizeHistogramForRle, in 1/256
+
 // Make the code lengths of a histogram cheaper to store, by smoothing
 // counts into runs of equal values (the reference encoder's heuristic).
 // Used symbols stay used.
@@ -3426,7 +3474,7 @@ void optimizeHistogramForRle(scope uint[] counts)
     }
 
     // Replace runs of similar counts by their average (24.8 fixed point).
-    enum size_t streakLimit = 1240;
+    enum size_t streakLimit = RLE_STREAK_LIMIT;
     size_t stride = 0;
     size_t limit = 256 * (cast(size_t) counts[0] + counts[1] + counts[2]) / 3 + 420;
     size_t sum = 0;
@@ -3690,6 +3738,10 @@ BrotliStatus clusterLiteralsByContext(scope const(uint)[] histograms, uint numTy
     return BrotliStatus.success;
 }
 
+// Above this (used histograms x their non-zero symbols), literals are
+// clustered with clusterLiteralsByContext, if the level allows.
+@tuning enum size_t FULL_CLUSTERING_MAX_WORK = 1 << 22;
+
 // Write data[start .. start + length] as a compressed meta-block made of `cmds`.
 BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data, size_t start,
                                       size_t length, scope const(Command)[] cmds, bool isLast,
@@ -3839,7 +3891,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
                     nonZero += nz;
                     used += nz != 0;
                 }
-                byContext = numLiteralHistograms > MAX_CLUSTER_INPUTS || used * nonZero > (1 << 22);
+                byContext = numLiteralHistograms > MAX_CLUSTER_INPUTS || used * nonZero > FULL_CLUSTERING_MAX_WORK;
             }
             if (byContext)
             {
@@ -4073,6 +4125,10 @@ bool copyCommands(ref const(CommandBuffer) from, ref CommandBuffer to)
     return true;
 }
 
+// Smaller meta-blocks adapt better, but cost more headers.
+@tuning enum size_t METABLOCK_LENGTH = 1 << 20;
+@tuning enum size_t OPTIMAL_METABLOCK_LENGTH = 1 << 19; // levels with optimal parsing
+
 BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int windowBits)
 {
     if (level < BROTLI_MIN_LEVEL)
@@ -4130,8 +4186,7 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
         return BrotliStatus.outOfMemory;
 
     DistanceCache last = kInitialDistanceCache;
-    // Smaller meta-blocks adapt better, but cost more headers.
-    size_t blockLength = optimal ? 1 << 19 : 1 << 20;
+    size_t blockLength = optimal ? OPTIMAL_METABLOCK_LENGTH : METABLOCK_LENGTH;
     size_t pos = 0;
     while (pos < input.length)
     {
