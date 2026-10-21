@@ -3086,37 +3086,40 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
     // cost[k]: cost of the best path ending with histogram k, relative to
     // the best path. Capped at switchCost: then the path switches from the
     // best one, and switchSignal records it.
+    // (The loops are branch-free, for vectorization.)
     size_t bitmapLength = (numHistograms + 7) >> 3;
-    cost[0 .. numHistograms] = 0;
-    switchSignal[0 .. n * bitmapLength] = 0;
+    uint[] costs = cost[0 .. numHistograms];
+    costs[] = 0;
     foreach (i, sym; symbols)
     {
         const(uint)[] ic = insertCost[sym * numHistograms .. (sym + 1) * numHistograms];
         uint minCost = uint.max;
-        uint best = 0;
-        foreach (k; 0 .. numHistograms)
+        foreach (k, ref c; costs)
         {
-            cost[k] += ic[k];
-            if (cost[k] < minCost)
-            {
-                minCost = cost[k];
-                best = cast(uint) k;
-            }
+            c += ic[k];
+            minCost = c < minCost ? c : minCost;
         }
+        uint best = 0;
+        while (costs[best] != minCost)
+            best++;
         blockIds[i] = cast(ubyte) best;
         uint sc = switchCost;
         if (i < SPLIT_WARMUP)
             sc = cast(uint)(cast(ulong) switchCost * (SPLIT_WARMUP_START * SPLIT_WARMUP + SPLIT_WARMUP_SLOPE * i)
                             / (100 * SPLIT_WARMUP));
         ubyte[] signal = switchSignal[i * bitmapLength .. (i + 1) * bitmapLength];
-        foreach (k; 0 .. numHistograms)
+        for (size_t k8 = 0; k8 < numHistograms; k8 += 8)
         {
-            cost[k] -= minCost;
-            if (cost[k] >= sc)
+            uint[] group = costs[k8 .. (k8 + 8 < numHistograms ? k8 + 8 : numHistograms)];
+            uint bits = 0;
+            foreach (j, ref c; group)
             {
-                cost[k] = sc;
-                signal[k >> 3] |= cast(ubyte)(1 << (k & 7));
+                uint d = c - minCost;
+                uint capped = d >= sc;
+                c = capped ? sc : d;
+                bits |= capped << j;
             }
+            signal[k8 >> 3] = cast(ubyte) bits;
         }
     }
 
