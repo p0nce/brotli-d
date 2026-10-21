@@ -955,28 +955,37 @@ void shortCodeDistances(ref const(DistanceCache) last, ref size_t[16] r)
     }
 }
 
-// Growable array of commands.
-struct CommandBuffer
+// Growable array. If an allocation fails, push returns false and sets `failed`.
+struct GrowableArray(T)
 {
 pure nothrow @nogc @safe:
-    Command[] storage;
+    T[] storage;
     size_t length;
+    bool failed;
 
-    bool push(Command c)
+    pragma(inline, true)
+    bool push(T value)
     {
-        if (length == storage.length)
-        {
-            size_t cap = storage.length < 1024 ? 1024 : storage.length * 2;
-            Command[] bigger = reallocArray(storage, cap);
-            if (bigger is null)
-                return false;
-            storage = bigger;
-        }
-        storage[length++] = c;
+        if (length == storage.length && !grow())
+            return false;
+        storage[length++] = value;
         return true;
     }
 
-    const(Command)[] opSlice() const
+    bool grow()
+    {
+        size_t cap = storage.length < 1024 ? 1024 : storage.length * 2;
+        T[] bigger = reallocArray(storage, cap);
+        if (bigger is null)
+        {
+            failed = true;
+            return false;
+        }
+        storage = bigger;
+        return true;
+    }
+
+    inout(T)[] opSlice() inout
     {
         return storage[0 .. length];
     }
@@ -987,6 +996,9 @@ pure nothrow @nogc @safe:
         length = 0;
     }
 }
+
+alias CommandBuffer = GrowableArray!Command;
+alias MatchBuffer = GrowableArray!BackwardMatch;
 
 // ---------------------------------------------------------------------------
 // Encoder: static dictionary
@@ -2168,41 +2180,6 @@ struct BackwardMatch
     uint wordLength; // 0 for backward references
 }
 
-struct MatchBuffer
-{
-pure nothrow @nogc @safe:
-    BackwardMatch[] storage;
-    size_t length;
-    bool failed;
-
-    pragma(inline, true)
-    void push(BackwardMatch m)
-    {
-        if (length == storage.length && !grow())
-            return;
-        storage[length++] = m;
-    }
-
-    bool grow()
-    {
-        size_t cap = storage.length < 4096 ? 4096 : storage.length * 2;
-        BackwardMatch[] bigger = reallocArray(storage, cap);
-        if (bigger is null)
-        {
-            failed = true;
-            return false;
-        }
-        storage = bigger;
-        return true;
-    }
-
-    void release()
-    {
-        freeArray(storage);
-        length = 0;
-    }
-}
-
 // All the matches at data[pos .. pos + maxLength], by increasing length:
 // very close ones, from the tree, and static dictionary words.
 void findAllMatches(ref TreeHasher t, scope const(ubyte)[] data, size_t pos, size_t maxLength,
@@ -2599,14 +2576,13 @@ bool zopfliCreateCommands(scope ZopfliNode[] nodes, size_t start, size_t end, si
     return true;
 }
 
-// Literal costs of data[start .. start + n] for the optimal parser, as
-// prefix sums: costs[i] is the cost of data[start .. start + i].
-// Without commands yet, from the statistics of all the bytes, ignoring
-// contexts: with contexts, they would be much too optimistic, since copied
-// bytes are counted. Else from the literals of `cmds`, the average of the
-// costs with and without contexts (of the cheapest mode).
-bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
-                         scope const(Command)[] cmds, ref EncoderWorkspace ws, scope double[] costs)
+// Histograms of the literals of `cmds` (or of all the bytes of
+// data[start .. start + n] if there are no commands) in each context of each
+// mode, into ws.modeHistograms[mode][context][symbol]. `bestMode` is the
+// cheapest mode, from a quick estimate: the cost of each context, without
+// clustering. Returns false if out of memory.
+bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
+                           scope const(Command)[] cmds, ref EncoderWorkspace ws, out uint bestMode)
 {
     enum A = NUM_LITERAL_CODES;
     if (!ensureLength(ws.modeHistograms, 4 * 64 * A))
@@ -2642,7 +2618,6 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
         }
     }
 
-    uint bestMode = 0;
     double best = double.max;
     foreach (mode; 0 .. 4)
     {
@@ -2659,6 +2634,23 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
             bestMode = mode;
         }
     }
+    return true;
+}
+
+// Literal costs of data[start .. start + n] for the optimal parser, as
+// prefix sums: costs[i] is the cost of data[start .. start + i].
+// Without commands yet, from the statistics of all the bytes, ignoring
+// contexts: with contexts, they would be much too optimistic, since copied
+// bytes are counted. Else from the literals of `cmds`, the average of the
+// costs with and without contexts (of the cheapest mode).
+bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
+                         scope const(Command)[] cmds, ref EncoderWorkspace ws, scope double[] costs)
+{
+    enum A = NUM_LITERAL_CODES;
+    uint bestMode;
+    if (!literalModeHistograms(data, start, n, cmds, ws, bestMode))
+        return false;
+    uint[] mh = ws.modeHistograms[0 .. 4 * 64 * A];
 
     // Costs of each context. Contexts without statistics use those of all contexts.
     if (!ensureLength(ws.literalContextCosts, 64 * A))
@@ -2812,7 +2804,7 @@ bool optimalParse(scope const(ubyte)[] data, size_t start, size_t end, size_t ma
     if (!computeLiteralCosts(data, start, n, previous, ws, literalCosts))
         return false;
     zopfliShortestPath(data, start, end, maxBackward, last, ws.numMatches[0 .. n],
-                       ws.matches.storage[0 .. ws.matches.length], model, literalCosts, params, nodes);
+                       ws.matches[], model, literalCosts, params, nodes);
     return zopfliCreateCommands(nodes, start, end, maxBackward, literalCosts, model, last, cmds);
 }
 
@@ -3631,47 +3623,12 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
 
     // Literal context mode: the same for all literal block types.
     uint contextMode = CONTEXT_LSB6;
+    // Clustering is slow: unless the level is high, only the mode of a cheap
+    // estimate is clustered.
     if (params.contextModeling && !params.tryAllContextModes)
     {
-        // Cheap estimate: cost of the literals of each context of each mode,
-        // without clustering.
-        if (!ensureLength(ws.modeHistograms, 4 * 64 * A))
+        if (!literalModeHistograms(data, start, length, cmds, ws, contextMode))
             return oom;
-        uint[] mh = ws.modeHistograms[0 .. 4 * 64 * A];
-        mh[] = 0;
-        size_t pos = start;
-        foreach (ref const c; cmds)
-        {
-            ubyte p1 = pos >= 1 ? data[pos - 1] : 0;
-            ubyte p2 = pos >= 2 ? data[pos - 2] : 0;
-            foreach (b; data[pos .. pos + c.insertLength])
-            {
-                foreach (mode; 0 .. 4)
-                {
-                    uint context = kContextLookupTables[mode * 2][p1] | kContextLookupTables[mode * 2 + 1][p2];
-                    mh[(mode * 64 + context) * A + b]++;
-                }
-                p2 = p1;
-                p1 = b;
-            }
-            pos += c.insertLength + c.outputLength;
-        }
-        double best = double.max;
-        foreach (mode; 0 .. 4)
-        {
-            double estimate = 0;
-            foreach (context; 0 .. 64)
-            {
-                const(uint)[] h = mh[(mode * 64 + context) * A .. (mode * 64 + context + 1) * A];
-                if (!isEmpty(h))
-                    estimate += populationCost(h, ws.log2);
-            }
-            if (estimate < best)
-            {
-                best = estimate;
-                contextMode = mode;
-            }
-        }
     }
 
     // Literal histograms of each (block type, context), clustered into trees.
@@ -4510,7 +4467,7 @@ unittest
             findAllMatches(t, data, pos, maxLength, maxDistance, kLevelParams[11], matches);
             assert(!matches.failed);
             size_t previous = 0;
-            foreach (ref m; matches.storage[0 .. matches.length])
+            foreach (ref m; matches[])
             {
                 assert(m.length > previous && m.length <= maxLength);
                 previous = m.length;

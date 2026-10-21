@@ -11,3 +11,4 @@ __dummy_docs/
 docs.json
 dub.selections.json
 *.exp
+__pycache__/
