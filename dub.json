@@ -15,6 +15,7 @@
         "source"
     ],
     "dependencies": {
+        "godot-math": "~>0.0.9",
         "numem": "~>1.6"
     }
 }

@@ -1,0 +1,88 @@
+Brotli encoder: remaining work
+==============================
+
+State (2026-10-21)
+------------------
+Milestones 1-6 of the plan are done: bit writer, prefix codes, greedy/lazy
+matching, literal and distance context modeling, static dictionary, block
+splitting, NPOSTFIX/NDIRECT search, optimal parsing (levels 10-11).
+
+Level 11 vs the reference encoder at q11 (smaller is better):
+    text -0.35%, C source +0.05%, maps -0.01%, qoi images -0.61%, 5 KB text +0.71%
+Level 10 beats q10 everywhere. Level 6 beats q6 except on large text (+0.9%).
+
+Verified: all levels round-trip through the D decoder and Google's C decoder
+on the edge-case corpus (encode_test.py). The full suite (all windows,
+18 MB inputs) passed up to milestone 5. The decoder suite still passes.
+
+
+1. Verify milestone 6
+---------------------
+[x] Quick suite, levels 10-11: passed (all levels, ALL OK).
+[x] encode_test.py rewritten: 16 s instead of 40+ min (parallel jobs,
+    inputs sized per level, fewer redundant compressions). Passes with the
+    asserts build. "long" puts back the heavy inputs at every level.
+[ ] encode_test.py long (stopped: too hot with 8 jobs; default is now 2 jobs,
+    JOBS=n to change).
+[ ] Same with a DMD debug build (build.sh dmd).
+
+
+2. Speed pass
+-------------
+Profile first, per phase, on: text, C source, maps, qoi, 5 KB, 50 bytes.
+Targets: level 6 at the speed of q6 or better, level 11 >= 1 MB/s.
+
+[ ] Fixed per-call costs (small inputs): workspace allocations, clearing
+    of 256 KB histograms, 64 KB context histograms per mode, hash table
+    clearing. Size everything from the input length.
+[ ] Clustering: the (block type x 64 contexts) literal histograms are the
+    main cost at levels 5-9. Options: cluster each block type's contexts,
+    then merge across types; cheaper pair costs; fewer literal block types
+    at mid levels; skip clustering for blocks with few literals.
+[ ] Block splitter: fewer histograms/iterations at mid levels; sample the
+    data for the initial histograms; float vs double costs.
+[ ] Match finder hot loop (levels 0-9): @trusted pointer code for the
+    candidate loop and quick rejects, without bounds checks where proven
+    safe. Check what LDC does with load32/load64.
+[ ] Bit writer: 64-bit flushes, fewer branches.
+[ ] Levels 0-1: a dedicated single-pass compressor (one hash entry, no
+    lazy matching, static-ish codes, no context modeling), like the
+    reference's q0/q1. Goal: 150+ MB/s.
+[ ] Optimal parsing: the trial meta-block encodes at level 11 (one per
+    pass); cheaper cost model updates; ComputeMinimumCopyLength-style
+    pruning for the tree matches too; profile zopfliShortestPath.
+[ ] Tune levels 2-9 for a smooth speed/ratio curve (bench at each level).
+After each change: unit tests, quick suite, ratio unchanged unless intended.
+
+
+3. Compression leftovers (small gains)
+--------------------------------------
+[ ] Level 11 on small inputs (+0.7% vs q11): look at header/tree costs,
+    block splitting of tiny blocks, dictionary choice.
+[ ] "Omit first n" dictionary transforms (8 of 121, not searched).
+[ ] Dictionary transforms (prefixes, suffixes, uppercase) for levels 5-9.
+[ ] Meta-block boundaries chosen from the data at levels 10-11.
+
+
+4. More testing
+---------------
+[ ] Fuzz loop: ~1M random structured inputs (mixes of text, binary, runs,
+    repeats at chosen distances, sizes around 2^16, 2^20, 2^24), all
+    levels and windows, checked by both decoders. Run with asserts on.
+[ ] Frozen encoder regression suite: fixed inputs, expected output
+    hashes per level, like test/suite.* for the decoder. Documents that
+    output changes are intended.
+[ ] Inputs > 4 GB on 64-bit (hash table rebase), if memory allows; or a
+    test with a forced small rebase threshold.
+[ ] Check -betterC build, and that everything stays @safe pure nothrow @nogc.
+
+
+5. Finish
+---------
+[ ] README: encoder API, levels, window, memory use per level (levels
+    10-11: ~8 bytes per window byte), speed and ratio table vs reference,
+    testing instructions (encode_test.py, encode_bench.py).
+[ ] Credit: the heuristics come from Google's reference encoder (MIT):
+    match scores, cost model constants, block splitter parameters,
+    histogram smoothing for RLE. Update dub.json description.
+[ ] Commits, one per step.
