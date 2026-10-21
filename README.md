@@ -46,7 +46,7 @@ by trailing bytes), `outputTooSmall`, `outOfMemory`.
 ## Testing
 
 ```
-dmd -of=tester -I<numem>/source -I<godot-math>/source -Isource test/tester.d source/brotli/*.d <numem>/source/numem/core/hooks.d <godot-math>/source/godotmath.d
+dmd -of=tester -I<numem>/source -Isource test/tester.d source/brotli/*.d <numem>/source/numem/core/hooks.d
 ./tester check test/suite.bin test/suite.txt
 ```
 

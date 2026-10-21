@@ -3,9 +3,9 @@ Brotli encoder (RFC 7932).
 
 One-shot compression from memory to memory, levels 0 to 11.
 Levels 0-9 use greedy and lazy matching, levels 10-11 optimal parsing.
-Uses the decoder's tables and static dictionary, numem for allocations,
-and godot-math for gm_log2.
-Everything is `@safe pure nothrow @nogc`.
+Uses the decoder's tables and static dictionary, and numem for allocations.
+Everything is `@safe pure nothrow @nogc`. Cost estimates use integer
+arithmetic only: the output is the same on every platform.
 
 Authored by Claude Opus 5.5.
 
@@ -37,7 +37,6 @@ if (brotliCompressAlloc(data, compressed, 11) == BrotliStatus.success)
 module brotli.encoder;
 
 import core.bitop : bsf, bsr;
-import godotmath : gm_log2;
 import brotli.decoder;
 
 @safe pure nothrow @nogc:
@@ -1021,8 +1020,8 @@ enum NUM_DICTIONARY_WORDS = 13504;
 
 // Dictionary words by hash of their first 4 bytes, ASCII case folded (to
 // find uppercased words too): the words of hash h are
-// words[bucketStart[h] .. bucketStart[h + 1]], as (length << 10) | index,
-// longest first.
+// words[bucketStart[h] .. bucketStart[h + 1]], as (length << 11) | index,
+// longest first. Indices have up to 11 bits (lengths 6 and 7: 2048 words).
 struct DictionaryHashTable
 {
     ushort[(1 << DICTIONARY_HASH_BITS) + 1] bucketStart;
@@ -1134,8 +1133,8 @@ bool findDictionaryReferences(scope const(ubyte)[] data, size_t pos, size_t maxL
         foreach (entry; kDictionaryHashTable.words[kDictionaryHashTable.bucketStart[h]
                                                    .. kDictionaryHashTable.bucketStart[h + 1]])
         {
-            size_t len = entry >> 10;
-            size_t idx = entry & 1023;
+            size_t len = entry >> 11;
+            size_t idx = entry & 2047;
             size_t offset = kDictionaryOffsets[len] + len * idx;
             const(ubyte)[] word = dict[offset .. offset + len];
             size_t limit = len < room ? len : room;
@@ -1247,7 +1246,7 @@ DictionaryHashTable buildDictionaryHashTable()
         foreach (idx; 0 .. 1u << kDictionarySizeBits[len])
         {
             uint h = dictionaryWordHash(kDictionaryOffsets[len] + len * idx);
-            t.words[fill[h]++] = cast(ushort)((len << 10) | idx);
+            t.words[fill[h]++] = cast(ushort)((len << 11) | idx);
         }
     }
     return t;
@@ -1267,8 +1266,8 @@ bool findDictionaryMatch(scope const(ubyte)[] data, size_t pos, size_t maxLength
     foreach (entry; kDictionaryHashTable.words[kDictionaryHashTable.bucketStart[h]
                                                .. kDictionaryHashTable.bucketStart[h + 1]])
     {
-        size_t len = entry >> 10;
-        size_t idx = entry & 1023;
+        size_t len = entry >> 11;
+        size_t idx = entry & 2047;
         size_t limit = len < maxLength ? len : maxLength;
         size_t offset = kDictionaryOffsets[len] + len * idx;
         const(ubyte)[] word = dict[offset .. offset + limit];
@@ -1650,30 +1649,125 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
 // Encoder: entropy model
 // ---------------------------------------------------------------------------
 
-// log2 of integers, for cost estimates: exact below 512, interpolated above
-// (error < 3e-6).
-struct Log2Table
+// Costs are in 1/65536 of a bit (16.16 fixed point): integer arithmetic,
+// the same on every platform.
+enum uint COST_ONE_BIT = 1 << 16;
+
+// log2(x) in fixed point with `fractionalBits` bits, truncated: by
+// repeated squaring of the mantissa. Slow, for checking the tables below.
+uint log2Squaring(size_t x, uint fractionalBits)
 {
-pure nothrow @nogc @safe:
-    double[513] small;
-
-    void initialize()
+    assert(x != 0 && fractionalBits <= 20);
+    uint e = bsr(x);
+    // Mantissa in [1, 2), in 1.31 fixed point.
+    ulong m = e >= 31 ? x >> (e - 31) : cast(ulong) x << (31 - e);
+    uint fraction = 0;
+    foreach (i; 0 .. fractionalBits)
     {
-        small[0] = 0;
-        foreach (i; 1 .. small.length)
-            small[i] = gm_log2(cast(double) i);
+        m = (m * m) >> 31; // in [1, 4)
+        fraction <<= 1;
+        if (m >= (2UL << 31))
+        {
+            fraction |= 1;
+            m >>= 1;
+        }
     }
+    return (e << fractionalBits) | fraction;
+}
 
-    pragma(inline, true)
-    double opCall(size_t v) const
-    {
-        if (v < 512)
-            return small[v];
-        uint e = bsr(v) - 8; // v >> e is in [256, 511]
-        size_t m = v >> e;
-        double frac = cast(double)(v & ((size_t(1) << e) - 1)) / (size_t(1) << e);
-        return e + small[m] + frac * (small[m + 1] - small[m]);
-    }
+// log2(1 + i / 256) in 16.16, rounded, for i in [0 .. 256]
+// (from log2Squaring, see the unittest).
+static immutable uint[257] kLog2Mantissa =
+[
+          0,     369,     736,    1102,    1466,    1829,    2190,    2551,
+       2909,    3267,    3623,    3978,    4331,    4683,    5034,    5384,
+       5732,    6079,    6425,    6769,    7112,    7454,    7795,    8134,
+       8473,    8810,    9146,    9480,    9814,   10146,   10477,   10807,
+      11136,   11464,   11791,   12116,   12440,   12764,   13086,   13407,
+      13727,   14046,   14363,   14680,   14996,   15310,   15624,   15937,
+      16248,   16559,   16868,   17177,   17484,   17791,   18096,   18401,
+      18704,   19007,   19308,   19609,   19909,   20207,   20505,   20802,
+      21098,   21393,   21687,   21980,   22272,   22564,   22854,   23144,
+      23433,   23720,   24007,   24293,   24579,   24863,   25146,   25429,
+      25711,   25992,   26272,   26551,   26830,   27108,   27384,   27660,
+      27936,   28210,   28484,   28757,   29029,   29300,   29571,   29840,
+      30109,   30378,   30645,   30912,   31178,   31443,   31707,   31971,
+      32234,   32496,   32758,   33019,   33279,   33538,   33797,   34055,
+      34312,   34569,   34825,   35080,   35334,   35588,   35841,   36094,
+      36346,   36597,   36847,   37097,   37346,   37595,   37842,   38090,
+      38336,   38582,   38827,   39072,   39316,   39559,   39802,   40044,
+      40286,   40527,   40767,   41006,   41246,   41484,   41722,   41959,
+      42196,   42432,   42667,   42902,   43137,   43370,   43603,   43836,
+      44068,   44300,   44530,   44761,   44990,   45220,   45448,   45676,
+      45904,   46131,   46357,   46583,   46809,   47034,   47258,   47482,
+      47705,   47928,   48150,   48372,   48593,   48813,   49034,   49253,
+      49472,   49691,   49909,   50127,   50344,   50560,   50776,   50992,
+      51207,   51422,   51636,   51850,   52063,   52276,   52488,   52700,
+      52911,   53122,   53332,   53542,   53751,   53960,   54169,   54377,
+      54584,   54791,   54998,   55204,   55410,   55615,   55820,   56025,
+      56229,   56432,   56635,   56838,   57040,   57242,   57443,   57644,
+      57845,   58045,   58245,   58444,   58643,   58841,   59039,   59237,
+      59434,   59631,   59827,   60023,   60219,   60414,   60609,   60803,
+      60997,   61190,   61384,   61576,   61769,   61961,   62152,   62343,
+      62534,   62725,   62915,   63104,   63294,   63483,   63671,   63859,
+      64047,   64234,   64421,   64608,   64794,   64980,   65166,   65351,
+      65536,
+];
+
+// log2(x) in 16.16, rounded, for x in [0 .. 255], log2(0) is 0
+// (from log2Squaring, see the unittest).
+static immutable uint[256] kLog2Small =
+[
+          0,       0,   65536,  103872,  131072,  152170,  169408,  183983,
+     196608,  207744,  217706,  226717,  234944,  242512,  249519,  256042,
+     262144,  267876,  273280,  278392,  283242,  287855,  292253,  296456,
+     300480,  304340,  308048,  311616,  315055,  318373,  321578,  324678,
+     327680,  330589,  333412,  336153,  338816,  341407,  343928,  346384,
+     348778,  351113,  353391,  355616,  357789,  359914,  361992,  364026,
+     366016,  367966,  369876,  371748,  373584,  375385,  377152,  378887,
+     380591,  382264,  383909,  385525,  387114,  388677,  390214,  391727,
+     393216,  394682,  396125,  397547,  398948,  400328,  401689,  403030,
+     404352,  405656,  406943,  408212,  409464,  410700,  411920,  413125,
+     414314,  415488,  416649,  417795,  418927,  420046,  421152,  422245,
+     423325,  424394,  425450,  426495,  427528,  428550,  429562,  430562,
+     431552,  432532,  433502,  434462,  435412,  436353,  437284,  438206,
+     439120,  440025,  440921,  441809,  442688,  443560,  444423,  445279,
+     446127,  446967,  447800,  448626,  449445,  450256,  451061,  451859,
+     452650,  453435,  454213,  454985,  455750,  456510,  457263,  458010,
+     458752,  459488,  460218,  460942,  461661,  462375,  463083,  463786,
+     464484,  465177,  465864,  466547,  467225,  467898,  468566,  469229,
+     469888,  470543,  471192,  471838,  472479,  473115,  473748,  474376,
+     475000,  475620,  476236,  476848,  477456,  478060,  478661,  479257,
+     479850,  480439,  481024,  481606,  482185,  482759,  483331,  483898,
+     484463,  485024,  485582,  486136,  486688,  487236,  487781,  488323,
+     488861,  489397,  489930,  490459,  490986,  491510,  492031,  492549,
+     493064,  493577,  494086,  494593,  495098,  495599,  496098,  496594,
+     497088,  497579,  498068,  498554,  499038,  499519,  499998,  500474,
+     500948,  501419,  501889,  502355,  502820,  503282,  503742,  504200,
+     504656,  505109,  505561,  506010,  506457,  506902,  507345,  507786,
+     508224,  508661,  509096,  509528,  509959,  510388,  510815,  511240,
+     511663,  512084,  512503,  512921,  513336,  513750,  514162,  514572,
+     514981,  515387,  515792,  516195,  516597,  516997,  517395,  517791,
+     518186,  518579,  518971,  519361,  519749,  520136,  520521,  520904,
+     521286,  521667,  522046,  522423,  522799,  523173,  523546,  523918,
+];
+
+// log2(x) in 16.16 fixed point, within 1/65536 of the exact value.
+// log2(0) is 0. At most 64 << 16, it fits in a uint.
+pragma(inline, true)
+uint log2Fixed(size_t x)
+{
+    if (x < 256)
+        return kLog2Small[x]; // the most common case, exact
+    uint e = bsr(x);
+    // Mantissa in [1, 2), in 2.30 fixed point: the 8 bits after the leading
+    // one index the table, the next 16 interpolate.
+    uint m = cast(uint)(e >= 30 ? x >> (e - 30) : x << (30 - e));
+    uint i = (m >> 22) & 255;
+    uint f = (m >> 6) & 0xFFFF;
+    uint a = kLog2Mantissa[i];
+    uint b = kLog2Mantissa[i + 1];
+    return (e << 16) + a + (((b - a) * f + 32768) >> 16);
 }
 
 bool isEmpty(scope const(uint)[] h)
@@ -1684,42 +1778,43 @@ bool isEmpty(scope const(uint)[] h)
     return true;
 }
 
-// Shannon entropy of the symbols of `h`, in bits, at least 1 bit per symbol.
-double bitsEntropy(scope const(uint)[] h, ref const(Log2Table) lg)
+// Shannon entropy of the symbols of `h`, at least 1 bit per symbol.
+ulong bitsEntropy(scope const(uint)[] h)
 {
     ulong total = 0;
-    double bits = 0;
+    ulong sum = 0; // of c * log2(c)
     foreach (c; h)
     {
         total += c;
-        bits -= c * lg(c);
+        sum += cast(ulong) c * log2Fixed(c);
     }
-    if (total != 0)
-        bits += total * lg(cast(size_t) total);
-    return bits < total ? total : bits;
+    ulong totalBits = total * log2Fixed(cast(size_t) total);
+    ulong bits = totalBits > sum ? totalBits - sum : 0;
+    ulong minimum = total * COST_ONE_BIT;
+    return bits < minimum ? minimum : bits;
 }
 
-// Estimated size in bits of symbols coded with a prefix code, including the
+// Estimated size of symbols coded with a prefix code, including the
 // prefix code itself (same model as the reference encoder). The non-zero
 // counts are given in increasing symbol order, with `add`.
 struct PopulationCost
 {
 pure nothrow @nogc @safe:
-    double log2Total;
-    double bits = 0;
+    uint log2Total;
+    ulong bits;
     uint maxDepth = 1;
     uint[18] depthHistogram;
     uint[4] firstCounts;
     size_t count;
     size_t next;    // symbol after the last one added
 
-    this(ref const(Log2Table) lg, ulong total)
+    this(ulong total)
     {
-        log2Total = lg(cast(size_t) total);
+        log2Total = log2Fixed(cast(size_t) total);
     }
 
     pragma(inline, true)
-    void add(size_t symbol, uint c, ref const(Log2Table) lg)
+    void add(size_t symbol, uint c)
     {
         assert(c != 0 && symbol >= next);
         if (count < 4)
@@ -1739,16 +1834,17 @@ pure nothrow @nogc @safe:
                 while (reps > 0)
                 {
                     depthHistogram[REPEAT_ZERO_CODE_LENGTH]++;
-                    bits += 3;
+                    bits += 3 * COST_ONE_BIT;
                     reps >>= 3;
                 }
             }
         }
 
         // Entropy of the symbol, and its approximate code length.
-        double log2p = log2Total - lg(c);
-        uint depth = cast(uint)(log2p + 0.5);
-        bits += c * log2p;
+        uint log2c = log2Fixed(c);
+        uint log2p = log2Total > log2c ? log2Total - log2c : 0;
+        uint depth = (log2p + COST_ONE_BIT / 2) >> 16;
+        bits += cast(ulong) c * log2p;
         if (depth > 15)
             depth = 15;
         if (depth > maxDepth)
@@ -1756,23 +1852,23 @@ pure nothrow @nogc @safe:
         depthHistogram[depth]++;
     }
 
-    double result(ref const(Log2Table) lg)
+    ulong result()
     {
-        enum double oneSymbolCost = 12;
-        enum double twoSymbolsCost = 20;
-        enum double threeSymbolsCost = 28;
-        enum double fourSymbolsCost = 37;
+        enum ulong oneSymbolCost = 12;
+        enum ulong twoSymbolsCost = 20;
+        enum ulong threeSymbolsCost = 28;
+        enum ulong fourSymbolsCost = 37;
         alias s = firstCounts;
         if (count <= 1)
-            return oneSymbolCost;
+            return oneSymbolCost * COST_ONE_BIT;
         if (count == 2)
-            return twoSymbolsCost + cast(double) s[0] + s[1];
+            return (twoSymbolsCost + s[0] + s[1]) * COST_ONE_BIT;
         if (count == 3)
         {
-            uint max = s[0] > s[1] ? s[0] : s[1];
+            ulong max = s[0] > s[1] ? s[0] : s[1];
             if (s[2] > max)
                 max = s[2];
-            return threeSymbolsCost + 2 * (cast(double) s[0] + s[1] + s[2]) - max;
+            return (threeSymbolsCost + 2 * (cast(ulong) s[0] + s[1] + s[2]) - max) * COST_ONE_BIT;
         }
         if (count == 4)
         {
@@ -1784,24 +1880,24 @@ pure nothrow @nogc @safe:
                     s[j] = s[j - 1];
                     s[j - 1] = t;
                 }
-            double h23 = cast(double) s[2] + s[3];
-            double max = h23 > s[0] ? h23 : s[0];
-            return fourSymbolsCost + 3 * h23 + 2 * (cast(double) s[0] + s[1]) - max;
+            ulong h23 = cast(ulong) s[2] + s[3];
+            ulong max = h23 > s[0] ? h23 : s[0];
+            return (fourSymbolsCost + 3 * h23 + 2 * (cast(ulong) s[0] + s[1]) - max) * COST_ONE_BIT;
         }
-        return bits + 18 + 2 * maxDepth + bitsEntropy(depthHistogram[], lg);
+        return bits + (18 + 2 * maxDepth) * COST_ONE_BIT + bitsEntropy(depthHistogram[]);
     }
 }
 
-double populationCost(scope const(uint)[] h, ref const(Log2Table) lg)
+ulong populationCost(scope const(uint)[] h)
 {
     ulong total = 0;
     foreach (c; h)
         total += c;
-    auto pc = PopulationCost(lg, total);
+    auto pc = PopulationCost(total);
     foreach (i, c; h)
         if (c != 0)
-            pc.add(i, c, lg);
-    return pc.result(lg);
+            pc.add(i, c);
+    return pc.result();
 }
 
 // Clustering works on at most that many histograms.
@@ -1817,15 +1913,14 @@ enum MAX_CLUSTER_INPUTS = 256;
 // for n * n values.
 uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabetSize,
                        uint maxClusters, scope ubyte[] map, scope uint[] clusters,
-                       scope ushort[] scratch, scope double[] deltaScratch,
-                       ref const(Log2Table) lg, out double totalCost)
+                       scope ushort[] scratch, scope long[] deltaScratch, out ulong totalCost)
 {
     assert(n >= 1 && n <= MAX_CLUSTER_INPUTS && maxClusters >= 1);
     assert(alphabetSize <= MAX_ALPHABET_SIZE);
     assert(histograms.length >= n * alphabetSize && clusters.length >= n * alphabetSize);
     assert(scratch.length >= n * alphabetSize && deltaScratch.length >= n * n);
 
-    double[MAX_CLUSTER_INPUTS] cost;
+    long[MAX_CLUSTER_INPUTS] cost;
     ulong[MAX_CLUSTER_INPUTS] total;
     bool[MAX_CLUSTER_INPUTS] active;
     ubyte[MAX_CLUSTER_INPUTS] owner;
@@ -1833,7 +1928,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
     ushort[MAX_ALPHABET_SIZE] tmpSymbols;
 
     // Cost change if clusters i < j were merged.
-    ref double delta(size_t i, size_t j) { return deltaScratch[i * n + j]; }
+    ref long delta(size_t i, size_t j) { return deltaScratch[i * n + j]; }
 
     const(uint)[] input(size_t i) { return histograms[i * alphabetSize .. (i + 1) * alphabetSize]; }
     uint[] cluster(size_t i) { return clusters[i * alphabetSize .. (i + 1) * alphabetSize]; }
@@ -1842,11 +1937,11 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 
     // Cost of the sum of cluster `a` (or of `aCounts` with non-zero symbols
     // `aSymbols`) and cluster `b`.
-    double mergedCost(scope const(uint)[] aCounts, scope const(ushort)[] aSymbols, ulong aTotal, size_t b)
+    long mergedCost(scope const(uint)[] aCounts, scope const(ushort)[] aSymbols, ulong aTotal, size_t b)
     {
         const(uint)[] bCounts = cluster(b);
         const(ushort)[] bSymbols = symbols(b);
-        auto pc = PopulationCost(lg, aTotal + total[b]);
+        auto pc = PopulationCost(aTotal + total[b]);
         size_t i = 0, j = 0;
         while (i < aSymbols.length || j < bSymbols.length)
         {
@@ -1860,9 +1955,9 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
                 s = aSymbols[i++];
                 j++;
             }
-            pc.add(s, aCounts[s] + bCounts[s], lg);
+            pc.add(s, aCounts[s] + bCounts[s]);
         }
-        return pc.result(lg);
+        return pc.result();
     }
 
     uint numActive = 0;
@@ -1882,7 +1977,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
         }
         numSymbols[i] = k;
         active[i] = k > 0;
-        cost[i] = active[i] ? populationCost(c, lg) : 0;
+        cost[i] = active[i] ? populationCost(c) : 0;
         owner[i] = cast(ubyte) i;
         if (active[i])
             numActive++;
@@ -1892,7 +1987,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
     {
         map[0 .. n] = 0;
         cluster(0)[] = 0;
-        totalCost = populationCost(cluster(0), lg);
+        totalCost = populationCost(cluster(0));
         return 1;
     }
     bool[MAX_CLUSTER_INPUTS] empty;
@@ -1908,7 +2003,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
     while (numActive > 1)
     {
         size_t bi = 0, bj = 0;
-        double best = double.max;
+        long best = long.max;
         foreach (i; 0 .. n)
         {
             if (!active[i])
@@ -1945,7 +2040,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
         {
             if (!active[j] || j == bi)
                 continue;
-            double d = mergedCost(ci, symbols(bi), total[bi], j) - cost[bi] - cost[j];
+            long d = mergedCost(ci, symbols(bi), total[bi], j) - cost[bi] - cost[j];
             if (j < bi)
                 delta(j, bi) = d;
             else
@@ -1971,12 +2066,12 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
                     t += v;
                 }
             }
-            double bestCost = double.max;
+            long bestCost = long.max;
             foreach (j; 0 .. n)
             {
                 if (!active[j])
                     continue;
-                double d = mergedCost(h, tmpSymbols[0 .. k], t, j) - cost[j];
+                long d = mergedCost(h, tmpSymbols[0 .. k], t, j) - cost[j];
                 if (d < bestCost)
                 {
                     bestCost = d;
@@ -2023,7 +2118,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
     }
     totalCost = 0;
     foreach (k; 0 .. numClusters)
-        totalCost += populationCost(cluster(k), lg);
+        totalCost += populationCost(cluster(k));
     return numClusters;
 }
 
@@ -2229,14 +2324,14 @@ void findAllMatches(ref TreeHasher t, scope const(ubyte)[] data, size_t pos, siz
 // Cost model of the optimal parser, in bits.
 struct ZopfliCostModel
 {
-    float[NUM_COMMAND_CODES] commandCost;
-    float[16 + 48] distanceCost; // NPOSTFIX = 0, NDIRECT = 0
-    float minCommandCost;
+    uint[NUM_COMMAND_CODES] commandCost;
+    uint[16 + 48] distanceCost; // NPOSTFIX = 0, NDIRECT = 0
+    uint minCommandCost;
 }
 
 // Costs from a histogram: Shannon bits, at least 1, a bit more than the
 // rarest for absent symbols.
-void setCosts(scope const(uint)[] histogram, scope float[] cost, bool literals, ref const(Log2Table) lg)
+void setCosts(scope const(uint)[] histogram, scope uint[] cost, bool literals)
 {
     size_t sum = 0;
     size_t missing = 0;
@@ -2246,8 +2341,8 @@ void setCosts(scope const(uint)[] histogram, scope float[] cost, bool literals, 
         if (c == 0)
             missing++;
     }
-    double log2Sum = lg(sum);
-    float missingCost = cast(float)(lg(literals ? sum : sum + missing) + 2);
+    uint log2Sum = log2Fixed(sum);
+    uint missingCost = log2Fixed(literals ? sum : sum + missing) + 2 * COST_ONE_BIT;
     foreach (i, c; histogram)
     {
         if (c == 0)
@@ -2255,14 +2350,17 @@ void setCosts(scope const(uint)[] histogram, scope float[] cost, bool literals, 
             cost[i] = missingCost;
             continue;
         }
-        float bits = cast(float)(log2Sum - lg(c));
-        cost[i] = bits < 1 ? 1 : bits;
+        uint log2c = log2Fixed(c);
+        uint bits = log2Sum > log2c ? log2Sum - log2c : 0;
+        cost[i] = bits < COST_ONE_BIT ? COST_ONE_BIT : bits;
     }
 }
 
+enum long UNREACHED = long.max;
+
 struct ZopfliNode
 {
-    float cost = float.infinity;
+    long cost = UNREACHED;
     uint start;         // where the insert of the command ending here starts
     uint copyLength;    // as coded, 0 if not reached by a command
     uint outputLength;
@@ -2275,7 +2373,7 @@ struct ZopfliNode
 struct StartPosition
 {
     size_t pos;
-    float costDiff;
+    long costDiff;
 }
 
 // Up to 8 start positions, sorted by costDiff. When full, a push replaces
@@ -2337,7 +2435,7 @@ void computeNodeCache(scope ZopfliNode[] nodes, size_t e, size_t blockStart, siz
 void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, size_t maxBackward,
                         ref const(DistanceCache) last, scope const(uint)[] numMatches,
                         scope const(BackwardMatch)[] matches, ref const(ZopfliCostModel) model,
-                        scope const(double)[] literalCosts, ref const(LevelParams) params,
+                        scope const(long)[] literalCosts, ref const(LevelParams) params,
                         scope ZopfliNode[] nodes)
 {
     enum LONG_COPY_QUICK_STEP = 16384;
@@ -2359,11 +2457,11 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
         matchIndex += numMatches[i];
 
         // A command ends here: the next one may start its insert here.
-        if (nodes[i].cost < float.infinity && (i == 0 || nodes[i].copyLength != 0))
+        if (nodes[i].cost != UNREACHED && (i == 0 || nodes[i].copyLength != 0))
         {
             if (i != 0)
                 computeNodeCache(nodes, i, start, maxBackward);
-            float costDiff = cast(float)(nodes[i].cost - literalCosts[i]);
+            long costDiff = nodes[i].cost - literalCosts[i];
             if (costDiff <= 0 || i == 0)
                 queue.push(StartPosition(i, costDiff));
         }
@@ -2377,7 +2475,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
 
             // Lengths that can't reach a node cheaper than it already is
             // are not worth trying.
-            float minCost = cast(float)(queue[0].costDiff + literalCosts[i]) + model.minCommandCost;
+            long minCost = queue[0].costDiff + literalCosts[i] + model.minCommandCost;
             size_t minLen = 2;
             {
                 size_t bucket = 4, nextOffset = 10;
@@ -2386,7 +2484,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     minLen++;
                     if (minLen == nextOffset)
                     {
-                        minCost += 1;
+                        minCost += COST_ONE_BIT;
                         nextOffset += bucket;
                         bucket *= 2;
                     }
@@ -2399,10 +2497,10 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                 StartPosition sp = queue[k];
                 size_t insertLength = i - sp.pos;
                 uint insertCode = insertLengthCode(insertLength);
-                float baseCost = cast(float)(sp.costDiff + literalCosts[i]) + kInsertLengthBits[insertCode];
+                long baseCost = sp.costDiff + literalCosts[i] + kInsertLengthBits[insertCode] * COST_ONE_BIT;
                 const(uint)[] cache = nodes[sp.pos].cache[];
 
-                void update(size_t len, size_t codedLength, size_t distance, float cost)
+                void update(size_t len, size_t codedLength, size_t distance, long cost)
                 {
                     ZopfliNode* node = &nodes[i + len];
                     if (cost < node.cost)
@@ -2433,7 +2531,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     size_t len = matchLength(data, prev, pos, maxLength);
                     if (len <= bestLen)
                         continue;
-                    float distanceCost = baseCost + model.distanceCost[code];
+                    long distanceCost = baseCost + model.distanceCost[code];
                     size_t l = bestLen + 1;
                     for (; l <= len; ++l)
                     {
@@ -2441,8 +2539,8 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                             l = len; // long copies: only the full length
                         uint copyCode = copyLengthCode(l);
                         uint cmd = commandSymbol(insertCode, copyCode, code == 0);
-                        float cost = (cmd < 128 ? baseCost : distanceCost) + kCopyLengthBits[copyCode]
-                                   + model.commandCost[cmd];
+                        long cost = (cmd < 128 ? baseCost : distanceCost)
+                                  + kCopyLengthBits[copyCode] * COST_ONE_BIT + model.commandCost[cmd];
                         update(l, l, cast(size_t) d, cost);
                     }
                     bestLen = len;
@@ -2457,7 +2555,7 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                     bool isDictionary = m.wordLength != 0;
                     uint dsym, dbits, dextra;
                     distanceSymbol(m.distance + 15, 0, 0, dsym, dbits, dextra);
-                    float distanceCost = baseCost + dbits + model.distanceCost[dsym];
+                    long distanceCost = baseCost + dbits * COST_ONE_BIT + model.distanceCost[dsym];
                     size_t maxMatchLen = m.length;
                     if (len < maxMatchLen && (isDictionary || maxMatchLen > maxZopfliLen))
                         len = maxMatchLen;
@@ -2466,7 +2564,8 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
                         size_t codedLength = isDictionary ? m.wordLength : len;
                         uint copyCode = copyLengthCode(codedLength);
                         uint cmd = commandSymbol(insertCode, copyCode, false);
-                        float cost = distanceCost + kCopyLengthBits[copyCode] + model.commandCost[cmd];
+                        long cost = distanceCost + kCopyLengthBits[copyCode] * COST_ONE_BIT
+                                  + model.commandCost[cmd];
                         update(len, codedLength, m.distance, cost);
                     }
                 }
@@ -2486,10 +2585,10 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
             for (size_t s = skip - 1; s > 0 && i < n; --s)
             {
                 matchIndex += numMatches[i];
-                if (nodes[i].cost < float.infinity && nodes[i].copyLength != 0)
+                if (nodes[i].cost != UNREACHED && nodes[i].copyLength != 0)
                 {
                     computeNodeCache(nodes, i, start, maxBackward);
-                    float costDiff = cast(float)(nodes[i].cost - literalCosts[i]);
+                    long costDiff = nodes[i].cost - literalCosts[i];
                     if (costDiff <= 0)
                         queue.push(StartPosition(i, costDiff));
                 }
@@ -2502,22 +2601,22 @@ void zopfliShortestPath(scope const(ubyte)[] data, size_t start, size_t end, siz
 // Commands of the cheapest path to the end of the block, from the nodes of
 // zopfliShortestPath. Appends them to `cmds` and updates `last`.
 bool zopfliCreateCommands(scope ZopfliNode[] nodes, size_t start, size_t end, size_t maxBackward,
-                          scope const(double)[] literalCosts, ref const(ZopfliCostModel) model,
+                          scope const(long)[] literalCosts, ref const(ZopfliCostModel) model,
                           ref DistanceCache last, ref CommandBuffer cmds)
 {
     size_t n = end - start;
     // End of the last command, the rest is inserted.
     size_t bestEnd = 0;
-    double bestCost = double.infinity;
+    long bestCost = long.max;
     foreach (e; 0 .. n + 1)
     {
-        if (!(nodes[e].cost < float.infinity) || (e != 0 && nodes[e].copyLength == 0))
+        if (nodes[e].cost == UNREACHED || (e != 0 && nodes[e].copyLength == 0))
             continue;
-        double cost = nodes[e].cost;
+        long cost = nodes[e].cost;
         if (e < n)
         {
             uint insertCode = insertLengthCode(n - e);
-            cost += literalCosts[n] - literalCosts[e] + kInsertLengthBits[insertCode]
+            cost += literalCosts[n] - literalCosts[e] + kInsertLengthBits[insertCode] * COST_ONE_BIT
                   + model.commandCost[commandSymbol(insertCode, 0, true)];
         }
         if (cost < bestCost)
@@ -2610,15 +2709,15 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
         }
     }
 
-    double best = double.max;
+    ulong best = ulong.max;
     foreach (mode; 0 .. 4)
     {
-        double estimate = 0;
+        ulong estimate = 0;
         foreach (context; 0 .. 64)
         {
             const(uint)[] h = mh[(mode * 64 + context) * A .. (mode * 64 + context + 1) * A];
             if (!isEmpty(h))
-                estimate += populationCost(h, ws.log2);
+                estimate += populationCost(h);
         }
         if (estimate < best)
         {
@@ -2636,7 +2735,7 @@ bool literalModeHistograms(scope const(ubyte)[] data, size_t start, size_t n,
 // bytes are counted. Else from the literals of `cmds`, the average of the
 // costs with and without contexts (of the cheapest mode).
 bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
-                         scope const(Command)[] cmds, ref EncoderWorkspace ws, scope double[] costs)
+                         scope const(Command)[] cmds, ref EncoderWorkspace ws, scope long[] costs)
 {
     enum A = NUM_LITERAL_CODES;
     uint bestMode;
@@ -2647,23 +2746,23 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
     // Costs of each context. Contexts without statistics use those of all contexts.
     if (!ws.literalContextCosts.ensure(64 * A))
         return false;
-    float[] contextCosts = ws.literalContextCosts;
+    uint[] contextCosts = ws.literalContextCosts;
     uint[A] all;
     foreach (context; 0 .. 64)
         all[] += mh[(bestMode * 64 + context) * A .. (bestMode * 64 + context + 1) * A];
-    float[A] allCosts;
-    setCosts(all[], allCosts[], true, ws.log2);
+    uint[A] allCosts;
+    setCosts(all[], allCosts[], true);
     foreach (context; 0 .. 64)
     {
         const(uint)[] h = mh[(bestMode * 64 + context) * A .. (bestMode * 64 + context + 1) * A];
-        float[] c = contextCosts[context * A .. (context + 1) * A];
+        uint[] c = contextCosts[context * A .. (context + 1) * A];
         if (isEmpty(h) || cmds.length == 0)
             c[] = allCosts[];
         else
         {
-            setCosts(h, c, true, ws.log2);
+            setCosts(h, c, true);
             foreach (k; 0 .. A)
-                c[k] = 0.5f * (c[k] + allCosts[k]);
+                c[k] = (c[k] + allCosts[k]) / 2;
         }
     }
 
@@ -2682,14 +2781,14 @@ bool computeLiteralCosts(scope const(ubyte)[] data, size_t start, size_t n,
 
 // Command and distance costs from the commands of a previous parse, or a
 // rough guess if there are none.
-void computeCommandCosts(scope const(Command)[] cmds, ref const(Log2Table) lg, ref ZopfliCostModel model)
+void computeCommandCosts(scope const(Command)[] cmds, ref ZopfliCostModel model)
 {
     if (cmds.length == 0)
     {
         foreach (i, ref c; model.commandCost)
-            c = cast(float) lg(11 + i);
+            c = log2Fixed(11 + i);
         foreach (i, ref c; model.distanceCost)
-            c = cast(float) lg(20 + i);
+            c = log2Fixed(20 + i);
     }
     else
     {
@@ -2708,10 +2807,10 @@ void computeCommandCosts(scope const(Command)[] cmds, ref const(Log2Table) lg, r
                 distanceHistogram[dsym]++;
             }
         }
-        setCosts(commandHistogram[], model.commandCost[], false, lg);
-        setCosts(distanceHistogram[], model.distanceCost[], false, lg);
+        setCosts(commandHistogram[], model.commandCost[], false);
+        setCosts(distanceHistogram[], model.distanceCost[], false);
     }
-    model.minCommandCost = float.max;
+    model.minCommandCost = uint.max;
     foreach (c; model.commandCost)
         if (c < model.minCommandCost)
             model.minCommandCost = c;
@@ -2789,10 +2888,10 @@ bool optimalParse(scope const(ubyte)[] data, size_t start, size_t end, size_t ma
     size_t n = end - start;
     if (!ws.literalCosts.ensure(n + 1) || !ws.nodes.ensure(n + 1))
         return false;
-    double[] literalCosts = ws.literalCosts[0 .. n + 1];
+    long[] literalCosts = ws.literalCosts[0 .. n + 1];
     ZopfliNode[] nodes = ws.nodes[0 .. n + 1];
     ZopfliCostModel model;
-    computeCommandCosts(previous, ws.log2, model);
+    computeCommandCosts(previous, model);
     if (!computeLiteralCosts(data, start, n, previous, ws, literalCosts))
         return false;
     zopfliShortestPath(data, start, end, maxBackward, last, ws.numMatches[0 .. n],
@@ -2887,16 +2986,16 @@ struct SplitParams
     uint symbolsPerHistogram;
     uint stride;                // length of samples of the initial histograms
     uint minLength;             // shorter is not split
-    float switchCost;           // bits
+    uint switchCost;            // in 1/65536 bit
     uint iterations;
 }
 
 static immutable SplitParams[2][3] kSplitParams =
 [
-    // Literals, commands, distances: [fast, best]
-    [SplitParams(16, 544, 70, 128, 28.1f, 2), SplitParams(100, 544, 70, 128, 28.1f, 10)],
-    [SplitParams(16, 530, 40, 128, 13.5f, 2), SplitParams(50, 530, 40, 128, 13.5f, 10)],
-    [SplitParams(16, 544, 40, 128, 14.6f, 2), SplitParams(50, 544, 40, 128, 14.6f, 10)],
+    // Literals, commands, distances: [fast, best]. Switch costs: 28.1, 13.5, 14.6 bits.
+    [SplitParams(16, 544, 70, 128, 1841562, 2), SplitParams(100, 544, 70, 128, 1841562, 10)],
+    [SplitParams(16, 530, 40, 128, 884736, 2), SplitParams(50, 530, 40, 128, 884736, 10)],
+    [SplitParams(16, 544, 40, 128, 956826, 2), SplitParams(50, 544, 40, 128, 956826, 10)],
 ];
 
 // Deterministic pseudo-random numbers for sampling.
@@ -2911,9 +3010,8 @@ uint nextRandom(ref uint seed)
 // switching histograms (Viterbi). Writes the histogram of each symbol to
 // blockIds.
 void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(uint)[] histograms,
-                size_t numHistograms, float switchCost, scope ubyte[] blockIds,
-                scope ubyte[] switchSignal, scope float[] insertCost, scope float[] cost,
-                ref const(Log2Table) lg)
+                size_t numHistograms, uint switchCost, scope ubyte[] blockIds,
+                scope ubyte[] switchSignal, scope uint[] insertCost, scope uint[] cost)
 {
     size_t n = symbols.length;
     if (numHistograms == 1)
@@ -2929,9 +3027,10 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
         ulong total = 0;
         foreach (c; h)
             total += c;
-        double log2Total = lg(cast(size_t) total);
+        uint log2Total = log2Fixed(cast(size_t) total);
         foreach (s, c; h)
-            insertCost[s * numHistograms + k] = cast(float)(log2Total - (c == 0 ? -2.0 : lg(c)));
+            insertCost[s * numHistograms + k] = c == 0 ? log2Total + 2 * COST_ONE_BIT
+                                                        : log2Total - log2Fixed(c);
     }
 
     // cost[k]: cost of the best path ending with histogram k, relative to
@@ -2942,8 +3041,8 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
     switchSignal[0 .. n * bitmapLength] = 0;
     foreach (i, sym; symbols)
     {
-        const(float)[] ic = insertCost[sym * numHistograms .. (sym + 1) * numHistograms];
-        float minCost = float.max;
+        const(uint)[] ic = insertCost[sym * numHistograms .. (sym + 1) * numHistograms];
+        uint minCost = uint.max;
         uint best = 0;
         foreach (k; 0 .. numHistograms)
         {
@@ -2956,9 +3055,9 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
         }
         blockIds[i] = cast(ubyte) best;
         // Switches are cheaper at the beginning, histograms are less reliable there.
-        float sc = switchCost;
+        uint sc = switchCost;
         if (i < 2000)
-            sc *= 0.77f + 0.07f * i / 2000;
+            sc = cast(uint)(cast(ulong) switchCost * (77 * 2000 + 7 * i) / (100 * 2000));
         ubyte[] signal = switchSignal[i * bitmapLength .. (i + 1) * bitmapLength];
         foreach (k; 0 .. numHistograms)
         {
@@ -3004,7 +3103,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
         return oom;
     uint[] histograms = ws.splitHistograms;
     ubyte[] blockIds = ws.splitBlockIds[0 .. n];
-    float[256] cost;
+    uint[256] cost;
 
     // Initial histograms: a sample of each part of the data, then more
     // random samples.
@@ -3041,7 +3140,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
     foreach (iteration; 0 .. p.iterations)
     {
         findBlocks(symbols, alphabetSize, histograms, numHistograms, p.switchCost, blockIds,
-                   ws.splitSignal, ws.splitInsertCost, cost[], ws.log2);
+                   ws.splitSignal, ws.splitInsertCost, cost[]);
         ushort[256] newId = ushort.max;
         size_t numUsed = 0;
         foreach (ref id; blockIds)
@@ -3060,9 +3159,9 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
 
     // Merge similar histograms into block types.
     ubyte[256] map;
-    double clusterCost;
+    ulong clusterCost;
     clusterHistograms(histograms, numHistograms, alphabetSize, 256, map[], ws.clusters,
-                      ws.clusterScratch, ws.clusterDelta, ws.log2, clusterCost);
+                      ws.clusterScratch, ws.clusterDelta, clusterCost);
 
     // Blocks, types numbered by first use.
     ushort[256] typeNumber = ushort.max;
@@ -3172,7 +3271,7 @@ pure nothrow @nogc @safe:
 // written to ws.clusters.
 BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphabetSize,
                          uint maxClusters, scope uint[] map, ref EncoderWorkspace ws,
-                         out uint numClusters, out double totalCost)
+                         out uint numClusters, out ulong totalCost)
 {
     assert(n >= 1 && maxClusters <= MAX_CLUSTER_INPUTS);
     enum batch = 64;
@@ -3182,7 +3281,7 @@ BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphab
     {
         ubyte[MAX_CLUSTER_INPUTS] m;
         numClusters = clusterHistograms(histograms, n, alphabetSize, maxClusters, m[], ws.clusters,
-                                        ws.clusterScratch, ws.clusterDelta, ws.log2, totalCost);
+                                        ws.clusterScratch, ws.clusterDelta, totalCost);
         foreach (i; 0 .. n)
             map[i] = m[i];
         return BrotliStatus.success;
@@ -3205,10 +3304,10 @@ BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphab
         {
             size_t bn = count - b < batch ? count - b : batch;
             ubyte[batch] m;
-            double cost;
+            ulong cost;
             uint k = clusterHistograms(reduced[b * alphabetSize .. $], bn, alphabetSize,
                                        pass == 0 ? batch : batch / 2, m[], ws.clusters,
-                                       ws.clusterScratch, ws.clusterDelta, ws.log2, cost);
+                                       ws.clusterScratch, ws.clusterDelta, cost);
             // Batches only move histograms down: reduced[newCount ..] does not
             // overlap the batches not yet clustered.
             reduced[newCount * alphabetSize .. (newCount + k) * alphabetSize] = ws.clusters[0 .. k * alphabetSize];
@@ -3222,7 +3321,7 @@ BrotliStatus clusterMany(scope const(uint)[] histograms, size_t n, size_t alphab
     }
     ubyte[MAX_CLUSTER_INPUTS] m;
     numClusters = clusterHistograms(reduced, count, alphabetSize, maxClusters, m[], ws.clusters,
-                                    ws.clusterScratch, ws.clusterDelta, ws.log2, totalCost);
+                                    ws.clusterScratch, ws.clusterDelta, totalCost);
     foreach (i; 0 .. n)
         map[i] = m[map[i]];
     return BrotliStatus.success;
@@ -3363,10 +3462,10 @@ void optimizeHistogramForRle(scope uint[] counts)
 }
 
 // Estimated size of the distances of `cmds`, with these distance parameters.
-double distanceCost(scope const(Command)[] cmds, uint npostfix, uint ndirect, ref const(Log2Table) lg)
+ulong distanceCost(scope const(Command)[] cmds, uint npostfix, uint ndirect)
 {
     uint[NUM_DISTANCE_SYMBOLS_MAX] histogram;
-    double extraBits = 0;
+    ulong extraBits = 0;
     foreach (ref const c; cmds)
     {
         if (!hasExplicitDistance(c))
@@ -3376,7 +3475,7 @@ double distanceCost(scope const(Command)[] cmds, uint npostfix, uint ndirect, re
         histogram[dsym]++;
         extraBits += dbits;
     }
-    return populationCost(histogram[0 .. 16 + ndirect + (48 << npostfix)], lg) + extraBits;
+    return populationCost(histogram[0 .. 16 + ndirect + (48 << npostfix)]) + extraBits * COST_ONE_BIT;
 }
 
 // Does the command have a distance symbol?
@@ -3389,22 +3488,22 @@ bool hasExplicitDistance(ref const(Command) c)
 }
 
 // Choose NPOSTFIX and NDIRECT.
-void chooseDistanceParams(scope const(Command)[] cmds, uint search, ref const(Log2Table) lg,
+void chooseDistanceParams(scope const(Command)[] cmds, uint search,
                           out uint npostfix, out uint ndirect)
 {
     npostfix = 0;
     ndirect = 0;
     if (search == 0)
         return;
-    double best = distanceCost(cmds, 0, 0, lg);
+    ulong best = distanceCost(cmds, 0, 0);
     foreach (p; 0 .. 4)
     {
-        double previous = double.max;
+        ulong previous = ulong.max;
         foreach (msb; 0 .. (search >= 2 ? 16 : 1))
         {
             if (p == 0 && msb == 0)
                 continue;
-            double cost = distanceCost(cmds, p, msb << p, lg);
+            ulong cost = distanceCost(cmds, p, msb << p);
             if (cost < best)
             {
                 best = cost;
@@ -3423,7 +3522,6 @@ struct EncoderWorkspace
 {
 pure nothrow @nogc @safe:
     CommandBuffer commands;
-    Log2Table log2;
 
     // Symbols of a meta-block.
     MallocArray!ushort literals;
@@ -3436,7 +3534,7 @@ pure nothrow @nogc @safe:
     MallocArray!uint splitHistograms;
     MallocArray!ubyte splitBlockIds;
     MallocArray!ubyte splitSignal;
-    MallocArray!float splitInsertCost;
+    MallocArray!uint splitInsertCost;
 
     // Histograms and prefix codes.
     MallocArray!uint modeHistograms;      // [mode][context][symbol], to choose the literal context mode
@@ -3449,7 +3547,7 @@ pure nothrow @nogc @safe:
     // Clustering.
     MallocArray!uint clusters;
     MallocArray!ushort clusterScratch;
-    MallocArray!double clusterDelta;
+    MallocArray!long clusterDelta;
     size_t clusteringCapacity; // histograms of MAX_ALPHABET_SIZE
 
     MallocArray!uint scratch;
@@ -3460,13 +3558,12 @@ pure nothrow @nogc @safe:
     BitWriter trial;
     MatchBuffer matches;
     MallocArray!uint numMatches;
-    MallocArray!double literalCosts;
-    MallocArray!float literalContextCosts;
+    MallocArray!long literalCosts;
+    MallocArray!uint literalContextCosts;
     MallocArray!ZopfliNode nodes;
 
     bool initialize()
     {
-        log2.initialize();
         return scratch.resize(2 * MAX_CONTEXT_MAP_LENGTH);
     }
 
@@ -3544,7 +3641,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
 
     // Distance parameters.
     uint npostfix, ndirect;
-    chooseDistanceParams(cmds, params.distanceParamSearch, ws.log2, npostfix, ndirect);
+    chooseDistanceParams(cmds, params.distanceParamSearch, npostfix, ndirect);
     uint numDistanceSymbols = 16 + ndirect + (48u << npostfix);
 
     // The symbols of each category, in order.
@@ -3639,7 +3736,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
     uint[] literalTrees = ws.treeHistograms;
     {
         uint bestTrees;
-        double bestCost = double.max;
+        ulong bestCost = ulong.max;
         foreach (mode; 0 .. 4)
         {
             bool tryMode = params.tryAllContextModes ? params.contextModeling || mode == 0 : mode == contextMode;
@@ -3666,7 +3763,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
                 pos += c.insertLength + c.outputLength;
             }
             uint numTrees;
-            double cost;
+            ulong cost;
             BrotliStatus r = clusterMany(h, numLiteralHistograms, A, 256, ws.clusterMap, ws,
                                          numTrees, cost);
             if (r != BrotliStatus.success)
@@ -3700,7 +3797,7 @@ BrotliStatus writeCompressedMetaBlock(ref BitWriter w, scope const(ubyte)[] data
             uint context = c.copyLength > 4 ? 3 : c.copyLength - 2;
             h[(cursor.type * 4 + context) * numDistanceSymbols + distanceSymbols[nd++]]++;
         }
-        double cost;
+        ulong cost;
         BrotliStatus r = clusterMany(h, numDistanceHistograms, numDistanceSymbols, 256, ws.clusterMap, ws,
                                      numDistanceTrees, cost);
         if (r != BrotliStatus.success)
@@ -4036,6 +4133,63 @@ version(unittest)
 
 unittest
 {
+    // Every dictionary word is in the bucket of its first 4 bytes, once.
+    immutable(ubyte)[] dict = dictionary();
+    size_t total = 0;
+    foreach (len; MIN_DICTIONARY_WORD_LENGTH .. MAX_DICTIONARY_WORD_LENGTH + 1)
+    {
+        foreach (idx; 0 .. 1u << kDictionarySizeBits[len])
+        {
+            size_t offset = kDictionaryOffsets[len] + len * idx;
+            uint h = dictionaryHash(load32(dict, offset));
+            size_t found = 0;
+            foreach (entry; kDictionaryHashTable.words[kDictionaryHashTable.bucketStart[h]
+                                                       .. kDictionaryHashTable.bucketStart[h + 1]])
+                if ((entry >> 11) == len && (entry & 2047) == idx)
+                    found++;
+            assert(found == 1);
+            total++;
+        }
+    }
+    assert(total == NUM_DICTIONARY_WORDS && kDictionaryHashTable.bucketStart[$ - 1] == NUM_DICTIONARY_WORDS);
+}
+
+unittest
+{
+    // The log2 tables.
+    foreach (x; 1 .. 256)
+        assert(kLog2Small[x] == (log2Squaring(x, 20) + 8) >> 4);
+    assert(kLog2Small[0] == 0);
+    foreach (i; 0 .. 257)
+        assert(kLog2Mantissa[i] == ((log2Squaring(256 + i, 20) - (8 << 20)) + 8) >> 4);
+}
+
+unittest
+{
+    // log2Fixed is within 1/65536 of log2 (here, of the squaring method with
+    // 20 fractional bits, rounded to 16), and never decreases.
+    void check(size_t x)
+    {
+        uint exact = (log2Squaring(x, 20) + 8) >> 4;
+        uint v = log2Fixed(x);
+        assert(v + 1 >= exact && v <= exact + 1);
+    }
+    uint previous = 0;
+    foreach (size_t x; 1 .. 1 << 20)
+    {
+        check(x);
+        uint v = log2Fixed(x);
+        assert(v >= previous);
+        previous = v;
+    }
+    for (ulong x = 1 << 20; x <= size_t.max / 2; x += x / 300_000 + 1)
+        check(cast(size_t) x);
+    assert(log2Fixed(0) == 0 && log2Fixed(1) == 0 && log2Fixed(2) == COST_ONE_BIT);
+    assert(log2Fixed(1 << 20) == 20 * COST_ONE_BIT);
+}
+
+unittest
+{
     // Length codes cover every length.
     foreach (len; 0 .. 70_000)
     {
@@ -4298,13 +4452,11 @@ unittest
 {
     // Clustering invariants.
     TestRandom rng;
-    Log2Table lg;
-    lg.initialize();
     enum A = 64;
     uint[MAX_CLUSTER_INPUTS * A] histograms;
     uint[MAX_CLUSTER_INPUTS * A] clusters;
     ushort[MAX_CLUSTER_INPUTS * A] scratch;
-    MallocArray!double delta;
+    MallocArray!long delta;
     assert(delta.resize(MAX_CLUSTER_INPUTS * MAX_CLUSTER_INPUTS));
     foreach (iter; 0 .. 300)
     {
@@ -4326,8 +4478,8 @@ unittest
             }
         }
         ubyte[MAX_CLUSTER_INPUTS] map;
-        double cost;
-        uint k = clusterHistograms(histograms[], n, A, maxClusters, map[], clusters[], scratch[], delta, lg, cost);
+        ulong cost;
+        uint k = clusterHistograms(histograms[], n, A, maxClusters, map[], clusters[], scratch[], delta, cost);
         assert(k >= 1 && k <= maxClusters && k <= n);
         bool[MAX_CLUSTER_INPUTS] used;
         foreach (i; 0 .. n)
@@ -4485,7 +4637,7 @@ unittest
     size_t modelSize = 0;
     foreach (i; 0 .. 200)
     {
-        StartPosition p = StartPosition(i, cast(float) rng.below(20));
+        StartPosition p = StartPosition(i, rng.below(20));
         q.push(p);
         if (modelSize == 8)
             modelSize--; // the last one is the most expensive
