@@ -4099,6 +4099,9 @@ void writeWindowBits(ref BitWriter w, uint lgwin)
         w.writeBits(7, ((lgwin - 8) << 4) | 1);
 }
 
+// With optimalKeepBest, the passes measured to keep the best one.
+@tuning enum uint OPTIMAL_FIRST_TRIED_PASS = 1;
+
 // Commands of data[start .. start + length] with optimal parsing, into
 // ws.commands. Each pass uses the statistics of the previous one. Updates `last`.
 BrotliStatus optimalCommands(ref TreeHasher t, scope const(ubyte)[] data, size_t start, size_t length,
@@ -4120,7 +4123,10 @@ BrotliStatus optimalCommands(ref TreeHasher t, scope const(ubyte)[] data, size_t
         if (!optimalParse(data, start, end, maxBackward, params, ws.previousCommands[], passLast,
                           ws.commands, ws))
             return oom;
-        if (params.optimalKeepBest)
+        // The first passes, from rough statistics, never compress best.
+        uint firstTried = OPTIMAL_FIRST_TRIED_PASS < params.optimalPasses ? OPTIMAL_FIRST_TRIED_PASS
+                                                                         : params.optimalPasses - 1;
+        if (params.optimalKeepBest && pass >= firstTried)
         {
             // Size of the meta-block with these commands, written aside.
             ws.trial.growable = true;
