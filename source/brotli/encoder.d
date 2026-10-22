@@ -1450,22 +1450,23 @@ struct LevelParams
     ubyte optimalStarts;    // positions tried for the start of each insert
     bool optimalKeepBest;   // keep the pass that compresses best, else the last
     bool clusterLiteralsByContext; // cheaper literal clustering when there are many histograms
+    ubyte hashLength;       // bytes hashed by the hash table: 4, or 5 for text (see textHashLength)
 }
 
 @tuning static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
 [
-    LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 0
-    LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false), // 1
-    LevelParams(15, 1,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false), // 2
-    LevelParams(15, 2,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false), // 3
-    LevelParams(15, 3,  4, true,   64, true, false, true, 0, 0, true, 0, 0, 0, false, false), // 4
-    LevelParams(15, 4,  4, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 5
-    LevelParams(15, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 6
-    LevelParams(16, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 7
-    LevelParams(16, 6, 16, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true), // 8
-    LevelParams(16, 6, 16, true,  512, true, true, true, 1, 2, true, 0, 0, 0, false, true), // 9
-    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 2, 150, 1, false, false), // 10
-    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 4, 325, 5, true, false), // 11
+    LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false, 4), // 0
+    LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false, 4), // 1
+    LevelParams(15, 1,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false, 4), // 2
+    LevelParams(15, 2,  4, true,   64, false, false, true, 0, 0, false, 0, 0, 0, false, false, 4), // 3
+    LevelParams(15, 3,  4, true,   64, true, false, true, 0, 0, true, 0, 0, 0, false, false, 4), // 4
+    LevelParams(15, 4,  4, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true, 5), // 5
+    LevelParams(15, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true, 5), // 6
+    LevelParams(16, 5, 10, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true, 5), // 7
+    LevelParams(16, 6, 16, true,   64, true, false, true, 1, 1, true, 0, 0, 0, false, true, 5), // 8
+    LevelParams(16, 6, 16, true,  512, true, true, true, 1, 2, true, 0, 0, 0, false, true, 5), // 9
+    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 2, 150, 1, false, false, 4), // 10
+    LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 4, 325, 5, true, false, 4), // 11
 ];
 
 // Hash table of recent positions, by hash of their next 4 bytes.
@@ -1478,12 +1479,15 @@ pure nothrow @nogc @safe:
     uint bucketBits;
     uint blockBits;
     uint blockMask;
+    uint hashLength;    // 4 or 5 bytes
     size_t base;
     size_t dictionaryLookups;
     size_t dictionaryMatches;
 
-    bool initialize(uint bucketBits, uint blockBits)
+    bool initialize(uint bucketBits, uint blockBits, uint hashLength)
     {
+        assert(hashLength == 4 || hashLength == 5);
+        this.hashLength = hashLength;
         this.bucketBits = bucketBits;
         this.blockBits = blockBits;
         blockMask = (1u << blockBits) - 1;
@@ -1501,17 +1505,27 @@ pure nothrow @nogc @safe:
         counts.release();
     }
 
+    // Hash of the hashLength (4 or 5) bytes at `pos`, which needs 4 bytes
+    // of data (a missing 5th byte counts as zero).
     pragma(inline, true)
-    uint hashAt(scope const(ubyte)[] data, size_t pos) const
+    uint hashAt(uint hashLength)(scope const(ubyte)[] data, size_t pos) const
     {
-        return (load32(data, pos) * 0x1E35A7BDu) >> (32 - bucketBits);
+        static if (hashLength == 4)
+            return (load32(data, pos) * 0x1E35A7BDu) >> (32 - bucketBits);
+        else
+        {
+            ulong v = load32(data, pos);
+            if (pos + 4 < data.length)
+                v |= ulong(data[pos + 4]) << 32;
+            return cast(uint)(((v << 24) * 0x1FE35A7BD3579BD3UL) >> (64 - bucketBits));
+        }
     }
 
     // Remember position `pos`, which needs 4 bytes of data.
     pragma(inline, true)
-    void store(scope const(ubyte)[] data, size_t pos)
+    void store(uint hashLength)(scope const(ubyte)[] data, size_t pos)
     {
-        uint key = hashAt(data, pos);
+        uint key = hashAt!hashLength(data, pos);
         uint n = counts[key];
         positions[(key << blockBits) + (n & blockMask)] = cast(uint)(pos - base);
         counts[key] = n + 1;
@@ -1532,7 +1546,7 @@ pure nothrow @nogc @safe:
 
 // Find the best match at data[pos .. pos + maxLength], at distances <= maxDistance.
 // Improves on `m`. Also remembers `pos` in the hash table.
-void findLongestMatch(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_t maxLength,
+void findLongestMatch(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_t maxLength,
                       size_t maxDistance, ref const(size_t[16]) shortDistances,
                       ref const(LevelParams) params, ref Match m)
 {
@@ -1564,7 +1578,7 @@ void findLongestMatch(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_
         }
     }
 
-    uint key = h.hashAt(data, pos);
+    uint key = h.hashAt!hashLength(data, pos);
     size_t bucket = size_t(key) << h.blockBits;
     uint n = h.counts[key];
     uint count = n < (1u << h.blockBits) ? n : (1u << h.blockBits);
@@ -1606,7 +1620,7 @@ void findLongestMatch(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_
 
 // LZ77 parse of data[start .. end]: appends commands to `cmds`, the last one
 // is insert-only if the block doesn't end with a copy. Updates `last`.
-bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_t end,
+bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, size_t start, size_t end,
                     size_t maxBackward, ref const(LevelParams) params,
                     ref DistanceCache last, ref CommandBuffer cmds)
 {
@@ -1623,7 +1637,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
         size_t maxLength = end - pos;
         size_t maxDistance = pos < maxBackward ? pos : maxBackward;
         Match m;
-        findLongestMatch(h, data, pos, maxLength, maxDistance, shortDistances, params, m);
+        findLongestMatch!hashLength(h, data, pos, maxLength, maxDistance, shortDistances, params, m);
         stored = pos + 1;
         if (m.score > MIN_SCORE)
         {
@@ -1634,7 +1648,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
                 {
                     Match m2;
                     size_t maxDistance2 = pos + 1 < maxBackward ? pos + 1 : maxBackward;
-                    findLongestMatch(h, data, pos + 1, maxLength - 1, maxDistance2, shortDistances,
+                    findLongestMatch!hashLength(h, data, pos + 1, maxLength - 1, maxDistance2, shortDistances,
                                      params, m2);
                     stored = pos + 2;
                     if (m2.score < m.score + LAZY_MATCH_MARGIN)
@@ -1667,7 +1681,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
             size_t matchEnd = pos + m.len;
             size_t storeTo = matchEnd < storeEnd ? matchEnd : storeEnd;
             for (size_t q = stored; q < storeTo; ++q)
-                h.store(data, q);
+                h.store!hashLength(data, q);
             pos = matchEnd;
         }
         else
@@ -1684,7 +1698,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
                     size_t jump = (pos + SKIP_FAR_JUMP < end - margin) ? pos + SKIP_FAR_JUMP : end - margin;
                     for (; pos < jump; pos += SKIP_FAR_STEP)
                     {
-                        h.store(data, pos);
+                        h.store!hashLength(data, pos);
                         insert += SKIP_FAR_STEP;
                     }
                 }
@@ -1693,7 +1707,7 @@ bool createCommands(ref Hasher h, scope const(ubyte)[] data, size_t start, size_
                     size_t jump = (pos + SKIP_NEAR_JUMP < end - margin) ? pos + SKIP_NEAR_JUMP : end - margin;
                     for (; pos < jump; pos += SKIP_NEAR_STEP)
                     {
-                        h.store(data, pos);
+                        h.store!hashLength(data, pos);
                         insert += SKIP_NEAR_STEP;
                     }
                 }
@@ -4198,6 +4212,37 @@ bool copyCommands(ref const(CommandBuffer) from, ref CommandBuffer to)
     return true;
 }
 
+// Inputs at least that long, and mostly UTF-8 text (at least
+// TEXT_UTF8_PERCENT of the bytes), are hashed on 5 bytes at the levels that allow it.
+@tuning enum size_t TEXT_HASH_MIN_LENGTH = 1 << 14;
+@tuning enum uint TEXT_UTF8_PERCENT = 75;
+@tuning enum size_t TEXT_SAMPLE_LENGTH = 1 << 16; // bytes checked for UTF-8, at the start
+
+// Is most of `data` UTF-8? (Bytes in well formed sequences, not checking
+// for overlong encodings: a heuristic.)
+bool isMostlyUTF8(scope const(ubyte)[] data)
+{
+    size_t utf8 = 0;
+    size_t i = 0;
+    while (i < data.length)
+    {
+        uint b = data[i];
+        size_t len = b < 0x80 ? 1 : (b >= 0xC2 && b < 0xE0 ? 2 : (b >= 0xE0 && b < 0xF0 ? 3 : (b >= 0xF0 && b < 0xF5 ? 4 : 0)));
+        bool valid = len != 0 && i + len <= data.length;
+        foreach (k; 1 .. len)
+            if (valid && (data[i + k] & 0xC0) != 0x80)
+                valid = false;
+        if (valid)
+        {
+            utf8 += len;
+            i += len;
+        }
+        else
+            i += 1;
+    }
+    return utf8 * 100 > data.length * TEXT_UTF8_PERCENT;
+}
+
 // Smaller meta-blocks adapt better, but cost more headers.
 @tuning enum size_t METABLOCK_LENGTH = 1 << 20;
 @tuning enum size_t OPTIMAL_METABLOCK_LENGTH = 1 << 19; // levels with optimal parsing
@@ -4249,7 +4294,13 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
         uint bucketBits = params.bucketBits;
         while (bucketBits > 8 && (size_t(1) << (bucketBits - 1)) >= input.length)
             bucketBits--;
-        if (!h.initialize(bucketBits, params.blockBits))
+        // Longer hashes are better for text, worse for binary data.
+        uint hashLength = params.hashLength;
+        if (hashLength == 5 && (input.length < TEXT_HASH_MIN_LENGTH
+                                || !isMostlyUTF8(input[0 .. input.length < TEXT_SAMPLE_LENGTH
+                                                            ? input.length : TEXT_SAMPLE_LENGTH])))
+            hashLength = 4;
+        if (!h.initialize(bucketBits, params.blockBits, hashLength))
             return BrotliStatus.outOfMemory;
     }
 
@@ -4283,7 +4334,10 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
         else
         {
             h.rebase(pos, maxBackward + MAX_METABLOCK_LENGTH);
-            if (!createCommands(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands))
+            bool ok = h.hashLength == 5
+                    ? createCommands!5(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands)
+                    : createCommands!4(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands);
+            if (!ok)
                 return BrotliStatus.outOfMemory;
         }
 
