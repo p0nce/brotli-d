@@ -34,8 +34,13 @@ Run encode_test.py with 2 jobs at most: the machine overheats with more.
     inputs sized per level, fewer redundant compressions). Passes with the
     asserts build. "long" puts back the heavy inputs at every level.
 [ ] encode_test.py long (stopped: too hot with 8 jobs; default is now 2 jobs,
-    JOBS=n to change).
-[ ] encode_test.py with a DMD debug build of the tester (not done yet).
+    JOBS=n to change). Run it after the speed changes.
+[ ] encode_test.py with a 32-bit LDC build of the tester (ldc2 -m32): only
+    the unit tests have run on 32-bit (DMD here builds 32-bit).
+[ ] Inputs over 2-4 GB: the rebasing of the hash table and of the match
+    tree (Hasher.rebase, TreeHasher.rebase) has never run. Test with a real
+    large input on 64-bit, and/or a test build with a tiny rebase threshold.
+(Allocation failures: not tested, on purpose, the user doesn't need it.)
 
 
 2. Speed pass
