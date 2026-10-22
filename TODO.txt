@@ -39,6 +39,25 @@ Compression leftovers (small gains)
 5. Tuning pass
 --------------
 [ ] Tune each @tuning constant, one by one, on the corpora, per level.
+    All change the output except TAGGED_MIN_LENGTH (speed only). Most
+    promising first:
+    1. OPTIMAL_METABLOCK_LENGTH (1 << 19): 1 << 18 gave -0.2% / -0.4% on
+       dice (windows 18 / 24) before 47fb668; the reference cuts 256 KB
+       blocks at q10-11. Also METABLOCK_LENGTH for levels 0-9.
+    2. kSplitParams: switch costs, maxHistograms (100 / 50) and iterations
+       of the best splitter. Retune since 47fb668: block clustering may now
+       pay for more initial histograms or cheaper switches.
+    3. LITERAL_CONTEXT_WEIGHT / LITERAL_ORDER0_WEIGHT: the parser keeps more
+       literals than the reference's. Order-0 only (0 / 1): dice -0.24% at
+       window 24 but +0.14% at window 18. Try 1 / 2, per input kind.
+    4. kLevelParams q10-11: optimalPasses (4), optimalStarts (5),
+       optimalMaxLength (325), and OPTIMAL_FIRST_TRIED_PASS. On dice the
+       passes oscillate (321-322.7 KB over 10 passes), they don't converge.
+    5. MISSING_SYMBOL_EXTRA_BITS (parser) and ABSENT_SYMBOL_EXTRA_BITS
+       (splitter): the costs of absent symbols drive which symbols the
+       parser and splitter avoid; 2 is the reference's, never measured here.
+    6. RLE_STREAK_LIMIT, FULL_CLUSTERING_MAX_WORK, CLUSTER_BATCH: small,
+       header and clustering effects.
 
 6. Finish
 ---------
