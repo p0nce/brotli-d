@@ -4442,7 +4442,7 @@ bool isMostlyUTF8(scope const(ubyte)[] data)
 
 // Smaller meta-blocks adapt better, but cost more headers.
 @tuning enum size_t METABLOCK_LENGTH = 1 << 20;
-@tuning enum size_t OPTIMAL_METABLOCK_LENGTH = 1 << 19; // levels with optimal parsing
+@tuning enum size_t OPTIMAL_METABLOCK_LENGTH = 3 << 17; // levels with optimal parsing
 
 BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int windowBits)
 {
