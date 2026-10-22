@@ -1652,7 +1652,9 @@ void findLongestMatch(uint hashLength, bool isTagged)(ref Hasher h, scope const(
             mask = (mask >> r) | (mask << (blockSize - r));
         if (blockSize < 64)
             mask &= (1UL << blockSize) - 1;
-        if (count < blockSize)
+        if (count == 0)
+            mask = 0; // also avoids shifting by 64 below
+        else if (count < blockSize)
             mask &= ~((1UL << (blockSize - count)) - 1);
         while (mask != 0 && bestLen < maxLength)
         {
