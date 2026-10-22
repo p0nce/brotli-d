@@ -3213,6 +3213,7 @@ struct SplitParams
     uint minLength;             // shorter is not split
     uint switchCost;            // in 1/65536 bit
     uint iterations;
+    bool clusterBlocks;         // cluster each block on its own, not the histograms (slower)
 }
 
 @tuning enum ABSENT_SYMBOL_EXTRA_BITS = 2; // cost of a symbol absent from a histogram, above log2(total)
@@ -3227,9 +3228,9 @@ struct SplitParams
 @tuning static immutable SplitParams[2][3] kSplitParams =
 [
     // Literals, commands, distances: [fast, best]. Switch costs: 28.1, 13.5, 14.6 bits.
-    [SplitParams(16, 544, 70, 128, 1841562, 2), SplitParams(100, 544, 70, 128, 1841562, 10)],
-    [SplitParams(16, 530, 40, 128, 884736, 2), SplitParams(50, 530, 40, 128, 884736, 10)],
-    [SplitParams(16, 544, 40, 128, 956826, 2), SplitParams(50, 544, 40, 128, 956826, 10)],
+    [SplitParams(16, 544, 70, 128, 1841562, 2, false), SplitParams(100, 544, 70, 128, 1841562, 10, true)],
+    [SplitParams(16, 530, 40, 128, 884736, 2, false), SplitParams(50, 530, 40, 128, 884736, 10, true)],
+    [SplitParams(16, 544, 40, 128, 956826, 2, false), SplitParams(50, 544, 40, 128, 956826, 10, true)],
 ];
 
 // Deterministic pseudo-random numbers for sampling.
@@ -3394,20 +3395,107 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
             break;
     }
 
-    // Merge similar histograms into block types.
-    ubyte[256] map;
-    ulong clusterCost;
-    clusterHistograms(histograms, numHistograms, alphabetSize, 256, map[], ws.clusters,
-                      ws.clusterScratch, ws.clusterDelta, clusterCost);
+    // Runs of the same histogram.
+    size_t numRuns = 1;
+    foreach (i; 1 .. n)
+        if (blockIds[i] != blockIds[i - 1])
+            numRuns++;
+    MallocArray!uint runLength;
+    MallocArray!uint runType;
+    MallocArray!uint runHistograms;
+    scope(exit)
+    {
+        runLength.release();
+        runType.release();
+        runHistograms.release();
+    }
+    if (!runLength.resize(numRuns) || !runType.resize(numRuns))
+        return oom;
+    {
+        size_t r = 0;
+        runLength[0] = 0;
+        runType[0] = blockIds[0];
+        foreach (i; 1 .. n)
+        {
+            runLength[r]++;
+            if (blockIds[i] != blockIds[i - 1])
+            {
+                runLength[++r] = 0;
+                runType[r] = blockIds[i];
+            }
+        }
+        runLength[r]++;
+    }
 
-    // Blocks, types numbered by first use.
+    if (!p.clusterBlocks)
+    {
+        // Merge similar histograms into block types.
+        ubyte[256] map;
+        ulong clusterCost;
+        clusterHistograms(histograms, numHistograms, alphabetSize, 256, map[], ws.clusters,
+                          ws.clusterScratch, ws.clusterDelta, clusterCost);
+        foreach (ref t; runType[0 .. numRuns])
+            t = map[t];
+    }
+    else
+    {
+        // Merge similar runs into block types, then move each run to the
+        // type that codes it best (merging can leave some in a worse one).
+        if (!runHistograms.resize(numRuns * alphabetSize))
+            return oom;
+        runHistograms[] = 0;
+        {
+            size_t pos = 0;
+            foreach (r; 0 .. numRuns)
+            {
+                foreach (s; symbols[pos .. pos + runLength[r]])
+                    runHistograms[r * alphabetSize + s]++;
+                pos += runLength[r];
+            }
+        }
+        uint numClusters;
+        ulong clusterCost;
+        BrotliStatus st = clusterMany(runHistograms[0 .. numRuns * alphabetSize], numRuns, alphabetSize, 256,
+                                      runType[0 .. numRuns], ws, numClusters, clusterCost);
+        if (st != BrotliStatus.success)
+            return st;
+        const(uint)[] clustered = ws.clusters[0 .. numClusters * alphabetSize];
+        ulong[256] clusteredCost;
+        foreach (k; 0 .. numClusters)
+            clusteredCost[k] = populationCost(clustered[k * alphabetSize .. (k + 1) * alphabetSize]);
+        // Bits added by run r to type k.
+        uint[MAX_ALPHABET_SIZE] sum;
+        long addedCost(size_t r, size_t k)
+        {
+            foreach (j; 0 .. alphabetSize)
+                sum[j] = runHistograms[r * alphabetSize + j] + clustered[k * alphabetSize + j];
+            return cast(long) populationCost(sum[0 .. alphabetSize]) - cast(long) clusteredCost[k];
+        }
+        foreach (r; 0 .. numRuns)
+        {
+            // On ties, the type of the previous run: no switch.
+            uint best = runType[r == 0 ? 0 : r - 1];
+            long bestBits = addedCost(r, best);
+            foreach (k; 0 .. numClusters)
+            {
+                long bits = addedCost(r, k);
+                if (bits < bestBits)
+                {
+                    bestBits = bits;
+                    best = k;
+                }
+            }
+            runType[r] = best;
+        }
+    }
+
+    // Blocks, types numbered by first use, neighbor runs of the same type merged.
     ushort[256] typeNumber = ushort.max;
     uint numTypes = 0;
     size_t numBlocks = 0;
     uint previous = uint.max;
-    foreach (id; blockIds)
+    foreach (t; runType[0 .. numRuns])
     {
-        uint t = map[id];
         if (typeNumber[t] == ushort.max)
             typeNumber[t] = cast(ushort) numTypes++;
         if (typeNumber[t] != previous)
@@ -3418,9 +3506,9 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
         return oom;
     size_t b = 0;
     previous = uint.max;
-    foreach (id; blockIds)
+    foreach (r; 0 .. numRuns)
     {
-        uint t = typeNumber[map[id]];
+        uint t = typeNumber[runType[r]];
         if (t != previous)
         {
             split.types[b] = cast(ubyte) t;
@@ -3428,7 +3516,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
             b++;
             previous = t;
         }
-        split.lengths[b - 1]++;
+        split.lengths[b - 1] += runLength[r];
     }
     assert(b == numBlocks && split.types[0] == 0);
     split.numBlocks = numBlocks;
