@@ -5,7 +5,7 @@ Compression ratio and speed of the D encoder, against the reference encoder.
 
 Requires: pip install brotli (the reference encoder, Google's C code).
 """
-import os, sys, glob, time, subprocess, tempfile
+import os, sys, glob, time, random, struct, subprocess, tempfile
 import brotli
 
 TESTER = sys.argv[1]
@@ -17,35 +17,48 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def read(p):
     return open(p, 'rb').read()
 
-inputs = [
-    ('text', b''.join(read(os.path.join(T, f)) for f in
-                      ['alice29.txt', 'asyoulik.txt', 'lcet10.txt', 'plrabn12.txt'])),
-    ('csrc', b''.join(read(f) for f in sorted(glob.glob(os.path.join(REPO, 'c', '**', '*.[ch]'), recursive=True))
-                      if 'dictionary' not in f)),
-    ('maps', read(os.path.join(T, 'mapsdatazrh'))),
-    ('qoi', b''.join(read(f) for f in sorted(glob.glob(os.path.join(HERE, '..', 'qoi_test_images', '*.qoi'))))),
-    ('small', read(os.path.join(T, 'asyoulik.txt'))[:5000]),
-]
+text = b''.join(read(os.path.join(T, f)) for f in ['alice29.txt', 'asyoulik.txt', 'lcet10.txt', 'plrabn12.txt'])
+csrc = b''.join(read(f) for f in sorted(glob.glob(os.path.join(REPO, 'c', '**', '*.[ch]'), recursive=True))
+                if 'dictionary' not in f)
 
-def ref_speed(data, q, seconds):
+# Small inputs: 100 chunks at random (fixed) offsets, each compressed on its own.
+def chunks(data, size):
+    rng = random.Random(size)
+    return [data[o:o + size] for o in (rng.randrange(len(data) - size) for _ in range(100))]
+
+inputs = [
+    ('text', [text]),
+    ('csrc', [csrc]),
+    ('maps', [read(os.path.join(T, 'mapsdatazrh'))]),
+    ('qoi', [b''.join(read(f) for f in sorted(glob.glob(os.path.join(HERE, '..', 'qoi_test_images', '*.qoi'))))]),
+]
+for size, label in [(100, '100'), (1000, '1k'), (5000, '5k')]:
+    inputs.append(('text' + label, chunks(text, size)))
+    inputs.append(('csrc' + label, chunks(csrc, size)))
+
+def ref_speed(parts, q, seconds):
     n = 0
     t = time.perf_counter()
     while True:
-        c = brotli.compress(data, quality=q)
+        size = sum(len(brotli.compress(d, quality=q)) for d in parts)
         n += 1
         if time.perf_counter() - t > seconds:
             break
-    return len(c), len(data) * n / (time.perf_counter() - t) / 1e6
+    return size, sum(map(len, parts)) * n / (time.perf_counter() - t) / 1e6
 
 with tempfile.TemporaryDirectory() as tmp:
-    print('%-6s %5s %10s %10s %8s %8s %8s' % ('input', 'level', 'D size', 'C size', 'D/C', 'D MB/s', 'C MB/s'))
-    for name, data in inputs:
+    print('%-8s %5s %10s %10s %8s %8s %8s' % ('input', 'level', 'D size', 'C size', 'D/C', 'D MB/s', 'C MB/s'))
+    for name, parts in inputs:
         p = os.path.join(tmp, name)
-        open(p, 'wb').write(data)
+        length = sum(map(len, parts))
+        if len(parts) == 1:
+            open(p, 'wb').write(parts[0])
+        else:
+            open(p, 'wb').write(b''.join(struct.pack('<I', len(d)) + d for d in parts))
         for level in LEVELS:
             slow = level >= 10
-            iters = 1 if slow else max(2, min(20, int(20e6 / len(data))))
-            r = subprocess.run([TESTER, 'enc', p, str(level), '24', str(iters)],
+            iters = 1 if slow else max(2, min(20, int(20e6 / length)))
+            r = subprocess.run([TESTER, 'enc' if len(parts) == 1 else 'encchunks', p, str(level), '24', str(iters)],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 print('TESTER FAILED', r.stdout, r.stderr)
@@ -53,5 +66,5 @@ with tempfile.TemporaryDirectory() as tmp:
             dsize, dspeed = r.stdout.split()
             dsize = int(dsize)
             dspeed = float(dspeed)
-            csize, cspeed = ref_speed(data, level, 0.05 if slow else 0.5)
-            print('%-6s %5d %10d %10d %8.3f %8.1f %8.1f' % (name, level, dsize, csize, dsize / csize, dspeed, cspeed))
+            csize, cspeed = ref_speed(parts, level, 0.05 if slow else 0.5)
+            print('%-8s %5d %10d %10d %8.3f %8.1f %8.1f' % (name, level, dsize, csize, dsize / csize, dspeed, cspeed))

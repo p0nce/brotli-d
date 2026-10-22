@@ -15,6 +15,10 @@ Test driver for the brotli decoder and encoder.
     tester enc <file> <level> <windowBits> <iterations>
         Compresses a file, checks that it decodes back, prints
         "<compressed size> <MB/s>" (best of the iterations).
+
+    tester encchunks <in> <level> <windowBits> <iterations>
+        Same for each record of <in> (same format as batch), compressed on
+        its own: prints "<total compressed size> <MB/s over all records>".
 */
 import std.stdio, std.file, std.conv, std.format, std.datetime.stopwatch;
 import brotli;
@@ -168,6 +172,52 @@ int main(string[] args)
         writefln("%s %.2f", c.length, best);
         return 0;
     }
+    if (args.length >= 6 && args[1] == "encchunks")
+    {
+        // Each input of a batch file (as for "batch") compressed on its own:
+        // total compressed size, and MB/s over all of them.
+        auto data = cast(ubyte[]) read(args[2]);
+        int level = to!int(args[3]);
+        int windowBits = to!int(args[4]);
+        int iters = to!int(args[5]);
+        ubyte[][] chunks;
+        size_t p = 0;
+        while (p < data.length)
+        {
+            uint n = data[p] | (data[p + 1] << 8) | (data[p + 2] << 16) | (data[p + 3] << 24);
+            p += 4;
+            chunks ~= data[p .. p + n];
+            p += n;
+        }
+        size_t total = 0;
+        size_t inputLength = 0;
+        size_t maxLength = 0;
+        foreach (chunk; chunks)
+        {
+            total += compressAndCheck(chunk, level, windowBits).length;
+            inputLength += chunk.length;
+            if (chunk.length > maxLength)
+                maxLength = chunk.length;
+        }
+        ubyte[] buf = new ubyte[brotliCompressBound(maxLength)];
+        double best = 0;
+        foreach (it; 0 .. iters)
+        {
+            auto sw = StopWatch(AutoStart.yes);
+            foreach (chunk; chunks)
+            {
+                size_t len;
+                if (brotliCompress(chunk, buf, len, level, windowBits) != BrotliStatus.success)
+                    return 1;
+            }
+            double secs = sw.peek.total!"usecs" / 1e6;
+            double speed = secs > 0 ? inputLength / secs / 1e6 : 0;
+            if (speed > best)
+                best = speed;
+        }
+        writefln("%s %.2f", total, best);
+        return 0;
+    }
     if (args.length >= 4 && args[1] == "batch")
     {
         auto data = cast(ubyte[]) read(args[2]);
@@ -229,6 +279,8 @@ int main(string[] args)
         return 0;
     }
     stderr.writeln("usage: tester batch <in> <out> | tester check <suite.bin> <suite.txt> | tester bench <file> <iters>\n"
-                 ~ "       tester encbatch <in> <out> <level> <windowBits> | tester enc <file> <level> <windowBits> <iters>");
+                 ~ "       tester encbatch <in> <out> <level> <windowBits> | tester enc <file> <level> <windowBits> <iters>
+"
+                 ~ "       tester encchunks <in> <level> <windowBits> <iters>");
     return 1;
 }
