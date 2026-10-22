@@ -2395,6 +2395,14 @@ pure nothrow @nogc @safe:
         size_t limit = data.length - pos;
         size_t maxCompLength = limit < MAX_TREE_COMP_LENGTH ? limit : MAX_TREE_COMP_LENGTH;
         bool reroot = limit >= MAX_TREE_COMP_LENGTH; // else the tree order can't be kept
+        // Comparisons need maxCompLength bytes, reports need maxLength: more
+        // would make long repeats quadratic.
+        static if (record)
+            size_t scanLimit = maxLength > maxCompLength ? maxLength : maxCompLength;
+        else
+            size_t scanLimit = maxCompLength;
+        if (scanLimit > limit)
+            scanLimit = limit;
         uint key = hashAt(data, pos);
         uint prev = buckets[key];
         size_t nodeLeft = 2 * (pos & windowMask);
@@ -2417,7 +2425,7 @@ pure nothrow @nogc @safe:
                 break;
             }
             size_t common = bestLenLeft < bestLenRight ? bestLenLeft : bestLenRight;
-            size_t len = common + matchLength(data, prevPos + common, pos + common, limit - common);
+            size_t len = common + matchLength(data, prevPos + common, pos + common, scanLimit - common);
             static if (record)
             {
                 size_t reported = len < maxLength ? len : maxLength;
