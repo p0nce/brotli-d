@@ -41,9 +41,10 @@ Compression leftovers (small gains)
 [ ] Tune each @tuning constant, one by one, on the corpora, per level.
     All change the output except TAGGED_MIN_LENGTH (speed only). Most
     promising first:
-    1. OPTIMAL_METABLOCK_LENGTH (1 << 19): 1 << 18 gave -0.2% / -0.4% on
-       dice (windows 18 / 24) before 47fb668; the reference cuts 256 KB
-       blocks at q10-11. Also METABLOCK_LENGTH for levels 0-9.
+    1. METABLOCK_LENGTH (1 << 20), levels 0-9. (OPTIMAL_METABLOCK_LENGTH
+       done in 7d1b162: 384 KB, swept 64 KB-4 MB on full inputs; sizes jump
+       by up to 0.9% between neighbor values, so data-chosen boundaries may
+       gain more than any fixed length.)
     2. kSplitParams: switch costs, maxHistograms (100 / 50) and iterations
        of the best splitter. Retune since 47fb668: block clustering may now
        pay for more initial histograms or cheaper switches.
