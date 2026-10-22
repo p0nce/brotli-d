@@ -1,19 +1,30 @@
 Brotli encoder: remaining work
 ==============================
 
-State (2026-10-21)
+State (2026-10-22)
 ------------------
 Milestones 1-6 of the plan are done: bit writer, prefix codes, greedy/lazy
 matching, literal and distance context modeling, static dictionary, block
 splitting, NPOSTFIX/NDIRECT search, optimal parsing (levels 10-11).
+Since then: split into brotli.decoder / brotli.encoder, MallocArray for all
+allocations, integer cost estimation (16.16 fixed point, same output on
+every platform), dictionary index fix (11-bit word indices), @tuning UDA on
+44 tuning constants, and the first speed changes (see 2).
 
-Level 11 vs the reference encoder at q11 (smaller is better):
-    text -0.35%, C source +0.05%, maps -0.01%, qoi images -0.61%, 5 KB text +0.71%
-Level 10 beats q10 everywhere. Level 6 beats q6 except on large text (+0.9%).
+Sizes vs the reference encoder (Python brotli 1.2.0), before the speed pass:
+level 11 is within -0.6% / +0.1% of q11 (and smaller on 5 KB of text since
+the dictionary index fix); level 10 beats q10 everywhere; levels 5-9 beat
+the reference's same levels except on large text (now smaller with the
+5-byte hash, cb38c2b).
 
-Verified: all levels round-trip through the D decoder and Google's C decoder
-on the edge-case corpus (encode_test.py). The full suite (all windows,
-18 MB inputs) passed up to milestone 5. The decoder suite still passes.
+Verified at every commit: unit tests (LDC, DMD is 32-bit here and also
+works), test/encode_test.py (round trips through the D decoder and Google's
+decoder, ~40 s with 2 jobs), the decoder suite (tester check
+test/suite.bin test/suite.txt).
+
+Setup for a new session: a checkout of github.com/google/brotli (testdata,
+C sources), and `pip install brotli` in a venv; both live outside the repo.
+Run encode_test.py with 2 jobs at most: the machine overheats with more.
 
 
 1. Verify milestone 6
@@ -24,7 +35,7 @@ on the edge-case corpus (encode_test.py). The full suite (all windows,
     asserts build. "long" puts back the heavy inputs at every level.
 [ ] encode_test.py long (stopped: too hot with 8 jobs; default is now 2 jobs,
     JOBS=n to change).
-[ ] Same with a DMD debug build (build.sh dmd).
+[ ] encode_test.py with a DMD debug build of the tester (not done yet).
 
 
 2. Speed pass
@@ -39,30 +50,65 @@ Rules:
 - Tuning constants are marked @tuning (UDA). The last pass tunes each of
   them, one by one.
 
-Profile first, per phase, on: text, C source, maps, qoi, 5 KB, 50 bytes.
-Targets: level 6 at the speed of q6 or better, level 11 >= 1 MB/s.
+How to measure (what the previous agent used):
+- Build testers with LDC "-O3 -release -boundscheck=off" (= dub -b
+  release-nobounds), all sources in one ldc2 call (= dub --combined, so that
+  intel-intrinsics is inlined). Unit tests: LDC with asserts on.
+- `tester enc <file> <level> 24 <iterations>` prints "<size> <MB/s>".
+  Compare a base and a new binary on text (alice29+asyoulik+lcet10+plrabn12
+  from Google's testdata), C source (Google's c/**/*.[ch] without dictionary),
+  mapsdatazrh, the qoi images concatenated, the first 5 KB of asyoulik.
+  Levels 10-11: the first 256 KB of each file (they are slow).
+- Noise is +-5% between runs: run the base and the new binary alternately,
+  2-3 times, before believing a difference under 10%.
+- Per-phase profile: timers (MonoTime) between the phases of encodeStream /
+  writeCompressedMetaBlock, in a copy of the source (debug blocks).
+  Inside the greedy parse: cycle counters (ldc.intrinsics.llvm_readcyclecounter).
+- When checking assembly for inlining, compile everything together
+  (-singleobj): compiling encoder.d alone shows calls that aren't there in
+  real builds.
 
-[ ] Fixed per-call costs (small inputs): workspace allocations, clearing
-    of 256 KB histograms, 64 KB context histograms per mode, hash table
-    clearing. Size everything from the input length.
-[ ] Clustering: the (block type x 64 contexts) literal histograms are the
-    main cost at levels 5-9. Options: cluster each block type's contexts,
-    then merge across types; cheaper pair costs; fewer literal block types
-    at mid levels; skip clustering for blocks with few literals.
-[ ] Block splitter: fewer histograms/iterations at mid levels; sample the
-    data for the initial histograms; float vs double costs.
-[ ] Match finder hot loop (levels 0-9): @trusted pointer code for the
-    candidate loop and quick rejects, without bounds checks where proven
-    safe. Check what LDC does with load32/load64.
-[ ] Bit writer: 64-bit flushes, fewer branches.
-[ ] Levels 0-1: a dedicated single-pass compressor (one hash entry, no
-    lazy matching, static-ish codes, no context modeling), like the
-    reference's q0/q1. Goal: 150+ MB/s.
-[ ] Optimal parsing: the trial meta-block encodes at level 11 (one per
-    pass); cheaper cost model updates; ComputeMinimumCopyLength-style
-    pruning for the tree matches too; profile zopfliShortestPath.
-[ ] Tune levels 2-9 for a smooth speed/ratio curve (bench at each level).
-After each change: unit tests, quick suite, ratio unchanged unless intended.
+Done (each commit has its measurements):
+[x] Literal clustering: by context when many dense histograms (8ec66c9).
+[x] Block splitter: branch-free Viterbi loops, vectorized by LLVM (d514f7f).
+[x] Level 11: reuse the best measured meta-block (4722725), don't measure
+    pass 0 (717c624).
+[x] Optimal parser: command cost tables per pass (d30f6dc).
+[x] Levels 5-9: 5-byte hash for text inputs >= 16 KB (cb38c2b), a
+    compression gain (-1% to -2% on text).
+[x] Levels 5-9: 8-bit tags in hash buckets, compared with SSE2
+    (intel-intrinsics), for binary inputs >= 1 MB (afa1608).
+
+Tried and dropped:
+- Tags for all inputs, or with text: slower on text (most bucket entries
+  really share the 4 bytes) and on small inputs (one more array to touch).
+- Prefetching the next position's bucket: no measurable gain.
+- Skipping the clearing of mode histograms: one-shot calls start with a
+  fresh workspace, the cost is first-touch page faults, not clearing.
+
+Open lead:
+- 5-byte hash at levels 2-4 for text: -1% to -3% size on 256 KB+ text,
+  speed -1% to -7%; but 64 KB of C source at level 4 was 47% slower (17 vs
+  32 MB/s, reproducible) for -2.2%. Not understood yet: profile that case
+  (more literals? dictionary lookups? clustering?) before enabling it.
+
+Next, by expected gain:
+[ ] Greedy parse (levels 0-9), 55% of level 6 on text: the bucket walk is
+    ~300 cycles per search (cache misses on the 4 MB of buckets and on the
+    window), the lazy step re-runs a full search.
+[ ] Fixed per-call costs (small inputs): a 50-byte input takes ~200 us at
+    level 6, mostly first touches of freshly allocated 64-256 KB arrays
+    (mode histograms, clustering buffers). Size them from the input. The user
+    has an idea for this one: ask them first.
+[ ] Block splitter: still 26-40% of levels 5-9 on images and text. Fewer
+    histograms/iterations at mid levels, sampling. Explicit SSE2 for the
+    switch bit packing (movemask) is worth a try.
+[ ] Optimal parsing (levels 10-11): the tree match finder (20-27% on text),
+    minimum copy length pruning for tree matches.
+[ ] Levels 0-1: a dedicated single-pass compressor, like the reference's
+    q0/q1 (150+ MB/s, we do ~55).
+[ ] Bit writer: 64-bit flushes, fewer branches (~20% of level 1).
+[ ] matchLength: 16 bytes at a time with SSE2.
 
 
 3. Compression leftovers (small gains)
