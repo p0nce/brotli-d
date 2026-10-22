@@ -1,0 +1,15 @@
+{
+    "name": "brotli-decode-example",
+    "description": "Example: decompress a Brotli (RFC 7932) file with the brotli library.",
+    "license": "MIT",
+    "targetType": "executable",
+    "targetName": "brotli-decode",
+    "sourcePaths": [
+        "source"
+    ],
+    "dependencies": {
+        "brotli": {
+            "path": "../.."
+        }
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "name": "brotli-encode-example",
+    "description": "Example: compress a file to Brotli (RFC 7932) with the brotli library.",
+    "license": "MIT",
+    "targetType": "executable",
+    "targetName": "brotli-encode",
+    "sourcePaths": [
+        "source"
+    ],
+    "dependencies": {
+        "brotli": {
+            "path": "../.."
+        }
+    }
+}
