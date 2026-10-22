@@ -1,24 +1,12 @@
 Brotli encoder: remaining work
 ==============================
 
-[ ] dice.qoi (520 KB), level 11 window 24: 317533 vs Google's q11 316671
-    (+0.27%, was +1.7% before 47fb668). Left:
-    - The parse keeps ~8K more bytes as literals than Google's (4 passes,
-      context-mixed literal costs); Google-like settings parse the same as
-      the reference, and were 0.3-0.5% smaller before 47fb668 (not
-      measured since).
-    - ClusterCostDiff (the reference's credit, in clustering merges, for the
-      bits saved on coding which cluster each input uses): -0.24% on dice at
-      level 11 when clustering blocks only, but +0.28% on qoi at level 10.
-    - Block clustering + reassignment at levels 5-9: -0.2% to -1.2%, but
-      30-57% slower. Needs a cheaper reassignment (cross-entropy with the
-      Viterbi insert costs instead of populationCost per run and type).
-
 Compression leftovers (small gains)
 --------------------------------------
 [ ] Level 11 on small inputs (+0.7% vs q11): look at header/tree costs,
     block splitting of tiny blocks, dictionary choice.
-[ ] "Omit first n" dictionary transforms (8 of 121, not searched).
+[x] "Omit first n" dictionary transforms, levels 10-11 only (see the
+    commit: text -0.10%, C q11 -0.14%, C q10 +0.03%). Not at levels 5-9.
 [ ] Dictionary transforms (prefixes, suffixes, uppercase) for levels 5-9.
 [ ] Meta-block boundaries chosen from the data at levels 10-11.
 
@@ -59,6 +47,8 @@ Compression leftovers (small gains)
        parser and splitter avoid; 2 is the reference's, never measured here.
     6. RLE_STREAK_LIMIT, FULL_CLUSTERING_MAX_WORK, CLUSTER_BATCH: small,
        header and clustering effects.
+    7. OMIT_FIRST_MIN_LENGTH (5): 4 / 5 / 6 / 8 were chaotic, +-0.1% per
+       file; 5 best summed over text, C, 5 KB.
 
 6. Finish
 ---------
