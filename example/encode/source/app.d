@@ -1,46 +1,84 @@
 /**
-    Compress a file to Brotli.
+    Compress a file to Brotli, trying every level and window size.
 
-    Usage: brotli-encode [-q level] [-w windowBits] <input> <output.br>
+    Usage: brotli-encode <input> <output.br>
 
-    Level is 0-11 (default 6, see BROTLI_DEFAULT_LEVEL). Window bits are 10-24.
+    Encodes the input with each level (BROTLI_MIN_LEVEL..BROTLI_MAX_LEVEL) and
+    each window size (BROTLI_MIN_WINDOW_BITS..BROTLI_MAX_WINDOW_BITS), prints
+    the compressed size, ratio (compressed / original) and encoding time of
+    each, then writes the smallest output to <output.br>. Ties go to the
+    faster encode.
 */
 module app;
 
+import std.datetime.stopwatch : StopWatch, AutoStart;
 import std.file : read, write;
-import std.getopt : getopt, defaultGetoptPrinter;
 import std.stdio : stderr, writefln;
 
 import brotli;
 
 int main(string[] args)
 {
-    int level = BROTLI_DEFAULT_LEVEL;
-    int windowBits = BROTLI_DEFAULT_WINDOW_BITS;
-
-    auto opt = getopt(args,
-        "q|quality", "Compression level, 0-11 (default 6).", &level,
-        "w|window", "Window size in bits, 10-24 (default 24).", &windowBits);
-
-    if (opt.helpWanted || args.length != 3)
+    if (args.length != 3)
     {
-        defaultGetoptPrinter("Usage: brotli-encode [options] <input> <output.br>",
-                             opt.options);
-        return opt.helpWanted ? 0 : 1;
+        stderr.writefln("Usage: brotli-encode <input> <output.br>");
+        return 1;
     }
 
     const(ubyte)[] input = cast(const(ubyte)[]) read(args[1]);
 
-    ubyte[] output;
-    BrotliStatus status = brotliCompressAlloc(input, output, level, windowBits);
-    if (status != BrotliStatus.success)
-    {
-        stderr.writefln("brotli-encode: compression failed (%s)", status);
-        return 1;
-    }
-    scope (exit) () @trusted { brotliFree(output); }();
+    writefln("%s: %d bytes", args[1], input.length);
+    writefln("%5s %6s %12s %8s %12s", "level", "window", "bytes", "ratio", "time");
 
-    write(args[2], output);
-    writefln("%s: %d -> %d bytes (level %d)", args[1], input.length, output.length, level);
+    ubyte[] best;
+    int bestLevel;
+    int bestWindow;
+    double bestMs;
+
+    foreach (level; BROTLI_MIN_LEVEL .. BROTLI_MAX_LEVEL + 1)
+    {
+        foreach (windowBits; BROTLI_MIN_WINDOW_BITS .. BROTLI_MAX_WINDOW_BITS + 1)
+        {
+            ubyte[] output;
+
+            StopWatch sw = StopWatch(AutoStart.yes);
+            BrotliStatus status = brotliCompressAlloc(input, output, level, windowBits);
+            sw.stop();
+            double ms = sw.peek.total!"usecs" / 1000.0;
+
+            if (status != BrotliStatus.success)
+            {
+                stderr.writefln("brotli-encode: compression failed at level %d, window %d (%s)",
+                                level, windowBits, status);
+                () @trusted { brotliFree(best); }();
+                return 1;
+            }
+
+            double ratio = input.length ? 100.0 * output.length / input.length : 0.0;
+            writefln("%5d %6d %12d %7.2f%% %9.1f ms", level, windowBits, output.length, ratio, ms);
+
+            bool better = best.length == 0 || output.length < best.length
+                       || (output.length == best.length && ms < bestMs);
+            if (better)
+            {
+                () @trusted { brotliFree(best); }();
+                best = output;
+                bestLevel = level;
+                bestWindow = windowBits;
+                bestMs = ms;
+            }
+            else
+                () @trusted { brotliFree(output); }();
+        }
+    }
+
+    scope (exit) () @trusted { brotliFree(best); }();
+
+    double bestRatio = input.length ? 100.0 * best.length / input.length : 0.0;
+    writefln("best: level %d, window %d, %d bytes, %.2f%%, %.1f ms",
+             bestLevel, bestWindow, best.length, bestRatio, bestMs);
+
+    write(args[2], best);
+    writefln("wrote %s", args[2]);
     return 0;
 }
