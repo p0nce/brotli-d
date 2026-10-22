@@ -37,6 +37,7 @@ if (brotliCompressAlloc(data, compressed, 11) == BrotliStatus.success)
 module brotli.encoder;
 
 import core.bitop : bsf, bsr;
+import inteli.emmintrin;
 import brotli.decoder;
 
 @safe pure nothrow @nogc:
@@ -1469,6 +1470,9 @@ struct LevelParams
     LevelParams(16, 6, 16, true,  512, true, true, true, 2, 2, true, 4, 325, 5, true, false, 4), // 11
 ];
 
+// Inputs from that long use tags in the hash table, see Hasher.
+@tuning enum size_t TAGGED_MIN_LENGTH = 1 << 20;
+
 // Hash table of recent positions, by hash of their next 4 bytes.
 // Each bucket is a ring of the most recent positions.
 struct Hasher
@@ -1476,6 +1480,13 @@ struct Hasher
 pure nothrow @nogc @safe:
     MallocArray!uint positions; // bucket * blockSize + i, relative to `base`
     MallocArray!uint counts;    // insertions in each bucket
+    // With `tagged`, each position also has an 8-bit tag, the hash bits
+    // below those of the bucket: positions with another tag don't have the
+    // same 4 bytes, they are skipped without reading their data. Worth it
+    // for buckets of 16 positions or more, with a 4 byte hash (binary data),
+    // and long inputs: many collisions.
+    MallocArray!ubyte tags;     // same indices as positions
+    bool tagged;
     uint bucketBits;
     uint blockBits;
     uint blockMask;
@@ -1484,7 +1495,7 @@ pure nothrow @nogc @safe:
     size_t dictionaryLookups;
     size_t dictionaryMatches;
 
-    bool initialize(uint bucketBits, uint blockBits, uint hashLength)
+    bool initialize(uint bucketBits, uint blockBits, uint hashLength, size_t inputLength)
     {
         assert(hashLength == 4 || hashLength == 5);
         this.hashLength = hashLength;
@@ -1493,6 +1504,9 @@ pure nothrow @nogc @safe:
         blockMask = (1u << blockBits) - 1;
         if (!positions.resize(size_t(1) << (bucketBits + blockBits))
             || !counts.resize(size_t(1) << bucketBits))
+            return false;
+        tagged = hashLength == 4 && blockBits >= 4 && inputLength >= TAGGED_MIN_LENGTH;
+        if (tagged && !tags.resize(size_t(1) << (bucketBits + blockBits)))
             return false;
         counts[] = 0; // positions are only read once written
         base = 0;
@@ -1503,6 +1517,16 @@ pure nothrow @nogc @safe:
     {
         positions.release();
         counts.release();
+        tags.release();
+    }
+
+    // Bucket and tag of the 4 bytes at `pos`.
+    pragma(inline, true)
+    void bucketAndTag(scope const(ubyte)[] data, size_t pos, out uint key, out ubyte tag) const
+    {
+        uint hash = load32(data, pos) * 0x1E35A7BDu;
+        key = hash >> (32 - bucketBits);
+        tag = cast(ubyte)(hash >> (24 - bucketBits));
     }
 
     // Hash of the hashLength (4 or 5) bytes at `pos`, which needs 4 bytes
@@ -1523,11 +1547,21 @@ pure nothrow @nogc @safe:
 
     // Remember position `pos`, which needs 4 bytes of data.
     pragma(inline, true)
-    void store(uint hashLength)(scope const(ubyte)[] data, size_t pos)
+    void store(uint hashLength, bool isTagged)(scope const(ubyte)[] data, size_t pos)
     {
-        uint key = hashAt!hashLength(data, pos);
+        static if (isTagged)
+        {
+            uint key;
+            ubyte tag;
+            bucketAndTag(data, pos, key, tag);
+        }
+        else
+            uint key = hashAt!hashLength(data, pos);
         uint n = counts[key];
-        positions[(key << blockBits) + (n & blockMask)] = cast(uint)(pos - base);
+        size_t slot = (size_t(key) << blockBits) + (n & blockMask);
+        positions[slot] = cast(uint)(pos - base);
+        static if (isTagged)
+            tags[slot] = tag;
         counts[key] = n + 1;
     }
 
@@ -1544,9 +1578,26 @@ pure nothrow @nogc @safe:
     }
 }
 
+// Bit i is set if tags[i] == tag. Halts unless tags.length is a multiple of
+// 16, at most 64, even in release builds.
+pragma(inline, true)
+ulong tagMask(scope const(ubyte)[] tags, ubyte tag) @trusted
+{
+    if (tags.length % 16 != 0 || tags.length > 64)
+        assert(0);
+    __m128i t = _mm_set1_epi8(cast(byte) tag);
+    ulong mask = 0;
+    for (size_t i = 0; i < tags.length; i += 16)
+    {
+        __m128i v = _mm_loadu_si128(cast(const(__m128i)*) &tags[i]);
+        mask |= cast(ulong)(cast(uint) _mm_movemask_epi8(_mm_cmpeq_epi8(v, t))) << i;
+    }
+    return mask;
+}
+
 // Find the best match at data[pos .. pos + maxLength], at distances <= maxDistance.
 // Improves on `m`. Also remembers `pos` in the hash table.
-void findLongestMatch(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_t maxLength,
+void findLongestMatch(uint hashLength, bool isTagged)(ref Hasher h, scope const(ubyte)[] data, size_t pos, size_t maxLength,
                       size_t maxDistance, ref const(size_t[16]) shortDistances,
                       ref const(LevelParams) params, ref Match m)
 {
@@ -1578,29 +1629,77 @@ void findLongestMatch(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, 
         }
     }
 
-    uint key = h.hashAt!hashLength(data, pos);
+    static if (isTagged)
+    {
+        uint key;
+        ubyte tag;
+        h.bucketAndTag(data, pos, key, tag);
+    }
+    else
+        uint key = h.hashAt!hashLength(data, pos);
     size_t bucket = size_t(key) << h.blockBits;
     uint n = h.counts[key];
-    uint count = n < (1u << h.blockBits) ? n : (1u << h.blockBits);
-    foreach (k; 0 .. count)
+    uint blockSize = 1u << h.blockBits;
+    uint count = n < blockSize ? n : blockSize;
+    static if (isTagged)
     {
-        if (bestLen >= maxLength)
-            break;
-        size_t prev = h.base + h.positions[bucket + ((n - 1 - k) & h.blockMask)];
-        size_t d = pos - prev;
-        if (d - 1 >= maxDistance) // older positions are even further
-            break;
-        if (data[prev + bestLen] != data[pos + bestLen])
-            continue;
-        size_t len = matchLength(data, prev, pos, maxLength);
-        if (len >= 4)
+        // Only the candidates with the same tag: a mask of the bucket,
+        // rotated so that bit b is candidate blockSize - 1 - b (the newest
+        // is the top bit), without the slots not written yet.
+        uint r = n & h.blockMask;
+        ulong mask = tagMask(h.tags[bucket .. bucket + blockSize], tag);
+        if (r != 0)
+            mask = (mask >> r) | (mask << (blockSize - r));
+        if (blockSize < 64)
+            mask &= (1UL << blockSize) - 1;
+        if (count < blockSize)
+            mask &= ~((1UL << (blockSize - count)) - 1);
+        while (mask != 0 && bestLen < maxLength)
         {
-            size_t score = backwardReferenceScore(len, d);
-            if (score > m.score)
+            uint b = bsr(mask);
+            mask ^= 1UL << b;
+            size_t prev = h.base + h.positions[bucket + ((b + r) & h.blockMask)];
+            size_t d = pos - prev;
+            if (d - 1 >= maxDistance) // older positions are even further
+                break;
+            if (data[prev + bestLen] != data[pos + bestLen])
+                continue;
+            size_t len = matchLength(data, prev, pos, maxLength);
+            if (len >= 4)
             {
-                m.len = bestLen = len;
-                m.distance = d;
-                m.score = score;
+                size_t score = backwardReferenceScore(len, d);
+                if (score > m.score)
+                {
+                    m.len = bestLen = len;
+                    m.distance = d;
+                    m.score = score;
+                }
+            }
+        }
+        h.tags[bucket + (n & h.blockMask)] = tag;
+    }
+    else
+    {
+        foreach (k; 0 .. count)
+        {
+            if (bestLen >= maxLength)
+                break;
+            size_t prev = h.base + h.positions[bucket + ((n - 1 - k) & h.blockMask)];
+            size_t d = pos - prev;
+            if (d - 1 >= maxDistance) // older positions are even further
+                break;
+            if (data[prev + bestLen] != data[pos + bestLen])
+                continue;
+            size_t len = matchLength(data, prev, pos, maxLength);
+            if (len >= 4)
+            {
+                size_t score = backwardReferenceScore(len, d);
+                if (score > m.score)
+                {
+                    m.len = bestLen = len;
+                    m.distance = d;
+                    m.score = score;
+                }
             }
         }
     }
@@ -1620,7 +1719,7 @@ void findLongestMatch(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, 
 
 // LZ77 parse of data[start .. end]: appends commands to `cmds`, the last one
 // is insert-only if the block doesn't end with a copy. Updates `last`.
-bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, size_t start, size_t end,
+bool createCommands(uint hashLength, bool isTagged)(ref Hasher h, scope const(ubyte)[] data, size_t start, size_t end,
                     size_t maxBackward, ref const(LevelParams) params,
                     ref DistanceCache last, ref CommandBuffer cmds)
 {
@@ -1637,7 +1736,7 @@ bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, si
         size_t maxLength = end - pos;
         size_t maxDistance = pos < maxBackward ? pos : maxBackward;
         Match m;
-        findLongestMatch!hashLength(h, data, pos, maxLength, maxDistance, shortDistances, params, m);
+        findLongestMatch!(hashLength, isTagged)(h, data, pos, maxLength, maxDistance, shortDistances, params, m);
         stored = pos + 1;
         if (m.score > MIN_SCORE)
         {
@@ -1648,7 +1747,7 @@ bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, si
                 {
                     Match m2;
                     size_t maxDistance2 = pos + 1 < maxBackward ? pos + 1 : maxBackward;
-                    findLongestMatch!hashLength(h, data, pos + 1, maxLength - 1, maxDistance2, shortDistances,
+                    findLongestMatch!(hashLength, isTagged)(h, data, pos + 1, maxLength - 1, maxDistance2, shortDistances,
                                      params, m2);
                     stored = pos + 2;
                     if (m2.score < m.score + LAZY_MATCH_MARGIN)
@@ -1681,7 +1780,7 @@ bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, si
             size_t matchEnd = pos + m.len;
             size_t storeTo = matchEnd < storeEnd ? matchEnd : storeEnd;
             for (size_t q = stored; q < storeTo; ++q)
-                h.store!hashLength(data, q);
+                h.store!(hashLength, isTagged)(data, q);
             pos = matchEnd;
         }
         else
@@ -1698,7 +1797,7 @@ bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, si
                     size_t jump = (pos + SKIP_FAR_JUMP < end - margin) ? pos + SKIP_FAR_JUMP : end - margin;
                     for (; pos < jump; pos += SKIP_FAR_STEP)
                     {
-                        h.store!hashLength(data, pos);
+                        h.store!(hashLength, isTagged)(data, pos);
                         insert += SKIP_FAR_STEP;
                     }
                 }
@@ -1707,7 +1806,7 @@ bool createCommands(uint hashLength)(ref Hasher h, scope const(ubyte)[] data, si
                     size_t jump = (pos + SKIP_NEAR_JUMP < end - margin) ? pos + SKIP_NEAR_JUMP : end - margin;
                     for (; pos < jump; pos += SKIP_NEAR_STEP)
                     {
-                        h.store!hashLength(data, pos);
+                        h.store!(hashLength, isTagged)(data, pos);
                         insert += SKIP_NEAR_STEP;
                     }
                 }
@@ -4300,7 +4399,7 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
                                 || !isMostlyUTF8(input[0 .. input.length < TEXT_SAMPLE_LENGTH
                                                             ? input.length : TEXT_SAMPLE_LENGTH])))
             hashLength = 4;
-        if (!h.initialize(bucketBits, params.blockBits, hashLength))
+        if (!h.initialize(bucketBits, params.blockBits, hashLength, input.length))
             return BrotliStatus.outOfMemory;
     }
 
@@ -4334,9 +4433,13 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
         else
         {
             h.rebase(pos, maxBackward + MAX_METABLOCK_LENGTH);
-            bool ok = h.hashLength == 5
-                    ? createCommands!5(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands)
-                    : createCommands!4(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands);
+            bool ok;
+            if (h.hashLength == 5)
+                ok = createCommands!(5, false)(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands);
+            else if (h.tagged)
+                ok = createCommands!(4, true)(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands);
+            else
+                ok = createCommands!(4, false)(h, input, pos, pos + length, maxBackward, params, newLast, ws.commands);
             if (!ok)
                 return BrotliStatus.outOfMemory;
         }

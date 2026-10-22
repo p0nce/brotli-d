@@ -97,4 +97,6 @@ After each change: unit tests, quick suite, ratio unchanged unless intended.
     10-11: ~8 bytes per window byte), speed and ratio table vs reference,
     testing instructions (encode_test.py, encode_bench.py).
 [ ] Update dub.json description (encoder authored by Claude Opus 5.5).
+[ ] README: build with dub --combined for speed (intel-intrinsics is only
+    inlined when compiled together with the encoder).
 [ ] Commits, one per step.

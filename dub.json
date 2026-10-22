@@ -15,6 +15,7 @@
         "source"
     ],
     "dependencies": {
+        "intel-intrinsics": "~>1.14",
         "numem": "~>1.6"
     }
 }
