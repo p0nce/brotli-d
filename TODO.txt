@@ -8,7 +8,16 @@ Compression leftovers (small gains)
 [x] "Omit first n" dictionary transforms, levels 10-11 only (see the
     commit: text -0.10%, C q11 -0.14%, C q10 +0.03%). Not at levels 5-9.
 [ ] Dictionary transforms (prefixes, suffixes, uppercase) for levels 5-9.
-[ ] Meta-block boundaries chosen from the data at levels 10-11.
+[x] Meta-block boundaries chosen from the data at levels 10-11
+    (chooseMetaBlocks: order-0 entropy of 16 KB chunks, dynamic
+    programming). Full inputs, q11: text -0.10%, C -0.45%, dice -0.10%,
+    qoi -0.16%; q10: C +0.29%, the others -0.07% to -0.11%. Validation
+    inputs mostly gain (to -1.3%), dictionary_inc.h +0.2% (one meta-block
+    instead of two).
+[ ] Same segmentation at levels 5-9, instead of METABLOCK_LENGTH.
+[ ] Segmentation from better statistics than order-0 bytes (e.g. the
+    literals and commands of a fast parse), or measured choices at level
+    11: sizes still swing by +-0.5% with the exact cut positions.
 
 
 4. More testing
@@ -29,10 +38,10 @@ Compression leftovers (small gains)
 [ ] Tune each @tuning constant, one by one, on the corpora, per level.
     All change the output except TAGGED_MIN_LENGTH (speed only). Most
     promising first:
-    1. METABLOCK_LENGTH (1 << 20), levels 0-9. (OPTIMAL_METABLOCK_LENGTH
-       done in 7d1b162: 384 KB, swept 64 KB-4 MB on full inputs; sizes jump
-       by up to 0.9% between neighbor values, so data-chosen boundaries may
-       gain more than any fixed length.)
+    1. METABLOCK_LENGTH (1 << 20), levels 0-9. (Levels 10-11 now choose
+       their meta-blocks, see SEGMENT_*: chunk 8 / 16 / 32 KB, penalty
+       380 / 510 / 765, max length 512 KB-4 MB swept on full inputs, 16 KB /
+       510 / 2 MB kept; the penalty is flat from 380 to 765.)
     2. kSplitParams: switch costs, maxHistograms (100 / 50) and iterations
        of the best splitter. Retune since 47fb668: block clustering may now
        pay for more initial histograms or cheaper switches.

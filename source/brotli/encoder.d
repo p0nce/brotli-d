@@ -4559,7 +4559,74 @@ bool isMostlyUTF8(scope const(ubyte)[] data)
 
 // Smaller meta-blocks adapt better, but cost more headers.
 @tuning enum size_t METABLOCK_LENGTH = 1 << 20;
-@tuning enum size_t OPTIMAL_METABLOCK_LENGTH = 3 << 17; // levels with optimal parsing
+
+// Levels with optimal parsing cut the input where its statistics change.
+// Meta-blocks are runs of SEGMENT_CHUNK bytes, at most SEGMENT_MAX_LENGTH
+// long, chosen to minimize the order-0 entropy of the bytes of each one,
+// plus SEGMENT_PENALTY bits per bit of log2 of its length.
+@tuning enum size_t SEGMENT_CHUNK = 1 << 14;
+@tuning enum size_t SEGMENT_MAX_LENGTH = 1 << 21;
+@tuning enum ulong SEGMENT_PENALTY = 510;
+
+// Ends of the meta-blocks of `input`, in order, into `ends`. The last one
+// is input.length.
+bool chooseMetaBlocks(scope const(ubyte)[] input, ref MallocArray!size_t ends, out size_t numBlocks)
+{
+    enum size_t G = SEGMENT_CHUNK;
+    enum size_t maxChunks = SEGMENT_MAX_LENGTH / G;
+    static assert(MIN_METABLOCK_LENGTH % G == 0 && SEGMENT_MAX_LENGTH % G == 0
+                  && SEGMENT_MAX_LENGTH >= 2 * MIN_METABLOCK_LENGTH);
+    size_t m = (input.length + G - 1) / G;
+    // best[j]: cost of the first j chunks, prev[j]: start of its last meta-block.
+    MallocArray!ulong best;
+    MallocArray!uint prev;
+    MallocArray!uint chunkHistograms; // of the last r chunks, a ring
+    size_t r = m < maxChunks ? m : maxChunks;
+    if (!best.resize(m + 1) || !prev.resize(m + 1) || !chunkHistograms.resize(r * 256)
+        || !ends.ensure(m))
+        return false;
+    uint[] ring = chunkHistograms[];
+    best[0] = 0;
+    foreach (j; 1 .. m + 1)
+    {
+        size_t end = j * G < input.length ? j * G : input.length;
+        uint[] chunk = ring[(j - 1) % r * 256 .. ((j - 1) % r + 1) * 256];
+        chunk[] = 0;
+        foreach (b; input[(j - 1) * G .. end])
+            chunk[b]++;
+        best[j] = ulong.max;
+        uint[256] h;
+        foreach_reverse (i; (j > maxChunks ? j - maxChunks : 0) .. j)
+        {
+            h[] += ring[i % r * 256 .. (i % r + 1) * 256];
+            size_t length = end - i * G;
+            // Meta-blocks are >= MIN_METABLOCK_LENGTH, except the last one.
+            if ((length < MIN_METABLOCK_LENGTH && j != m) || best[i] == ulong.max)
+                continue;
+            ulong sum = 0; // of c * log2(c)
+            foreach (c; h)
+                sum += cast(ulong) c * log2Fixed(c);
+            ulong totalBits = cast(ulong) length * log2Fixed(length);
+            ulong bits = totalBits > sum ? totalBits - sum : 0;
+            ulong cost = best[i] + bits + SEGMENT_PENALTY * log2Fixed(length);
+            if (cost < best[j])
+            {
+                best[j] = cost;
+                prev[j] = cast(uint) i;
+            }
+        }
+    }
+    numBlocks = 0;
+    for (size_t j = m; j > 0; j = prev[j])
+        ends[numBlocks++] = j * G < input.length ? j * G : input.length;
+    foreach (k; 0 .. numBlocks / 2)
+    {
+        size_t e = ends[k];
+        ends[k] = ends[numBlocks - 1 - k];
+        ends[numBlocks - 1 - k] = e;
+    }
+    return true;
+}
 
 BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int windowBits)
 {
@@ -4623,16 +4690,25 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
     if (!ws.initialize())
         return BrotliStatus.outOfMemory;
 
+    MallocArray!size_t ends;
+    size_t numBlocks = 0;
+    if (optimal && !chooseMetaBlocks(input, ends, numBlocks))
+        return BrotliStatus.outOfMemory;
+
     DistanceCache last = kInitialDistanceCache;
-    size_t blockLength = optimal ? OPTIMAL_METABLOCK_LENGTH : METABLOCK_LENGTH;
     size_t pos = 0;
+    size_t block = 0;
     while (pos < input.length)
     {
         // Meta-blocks are >= MIN_METABLOCK_LENGTH, except the last one.
         size_t length = input.length - pos;
-        if (length > blockLength && length - blockLength >= MIN_METABLOCK_LENGTH)
-            length = blockLength;
-        assert(length <= blockLength + MIN_METABLOCK_LENGTH && length <= MAX_METABLOCK_LENGTH);
+        if (optimal)
+            length = ends[block++] - pos;
+        else if (length > METABLOCK_LENGTH && length - METABLOCK_LENGTH >= MIN_METABLOCK_LENGTH)
+            length = METABLOCK_LENGTH;
+        assert(length <= (optimal ? SEGMENT_MAX_LENGTH : METABLOCK_LENGTH + MIN_METABLOCK_LENGTH)
+               && length <= MAX_METABLOCK_LENGTH);
+        assert(length >= MIN_METABLOCK_LENGTH || pos + length == input.length);
         bool isLast = pos + length == input.length;
 
         ws.commands.length = 0;
@@ -5323,6 +5399,38 @@ unittest
     ubyte[] empty;
     size_t len;
     assert(brotliCompress(null, empty, len) == BrotliStatus.outputTooSmall);
+}
+
+unittest
+{
+    // Meta-blocks cut where the statistics change: 300000 bytes of a few
+    // letters, 300000 random bytes, then 3 MB of zeros, longer than a meta-block.
+    MallocArray!ubyte input;
+    assert(input.resize(3_600_000));
+    TestRandom rng;
+    foreach (i; 0 .. 300_000)
+        input[i] = cast(ubyte)('a' + rng.below(4));
+    foreach (i; 300_000 .. 600_000)
+        input[i] = cast(ubyte) rng.next();
+    input[600_000 .. 3_600_000] = 0;
+    MallocArray!size_t ends;
+    size_t numBlocks;
+    assert(chooseMetaBlocks(input[], ends, numBlocks));
+    bool cut1, cut2;
+    size_t start = 0;
+    foreach (end; ends[0 .. numBlocks])
+    {
+        assert(end > start && end - start <= SEGMENT_MAX_LENGTH);
+        assert(end - start >= MIN_METABLOCK_LENGTH || end == input.length);
+        cut1 |= end > 300_000 - SEGMENT_CHUNK && end < 300_000 + SEGMENT_CHUNK;
+        cut2 |= end > 600_000 - SEGMENT_CHUNK && end < 600_000 + SEGMENT_CHUNK;
+        start = end;
+    }
+    assert(start == input.length && cut1 && cut2);
+
+    // One meta-block for short inputs.
+    assert(chooseMetaBlocks(input[0 .. 100], ends, numBlocks));
+    assert(numBlocks == 1 && ends[0] == 100);
 }
 
 
