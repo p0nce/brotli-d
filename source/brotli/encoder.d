@@ -2091,7 +2091,7 @@ ulong bitsEntropy(scope const(uint)[] h)
 // Estimated sizes of prefix codes in bits: simple codes of 1 to 4 symbols,
 // complex codes (plus the entropy of their code lengths).
 @tuning enum ulong ONE_SYMBOL_CODE_BITS = 17;
-@tuning enum ulong TWO_SYMBOLS_CODE_BITS = 23;
+@tuning enum ulong TWO_SYMBOLS_CODE_BITS = 25;
 @tuning enum ulong THREE_SYMBOLS_CODE_BITS = 31;
 @tuning enum ulong FOUR_SYMBOLS_CODE_BITS = 39;
 @tuning enum ulong COMPLEX_CODE_BITS = 17;
