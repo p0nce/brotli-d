@@ -88,8 +88,10 @@ Compression leftovers (small gains)
       block clustering may now pay for more initial histograms or cheaper
       switches. clusterBlocks in the fast splitter: -0.2% to -0.3% for 30-57%
       of the speed (47fb668).
-    - ABSENT_SYMBOL_EXTRA_BITS (2): cost of a symbol absent from a
-      histogram. The reference's value, never measured here.
+    - ABSENT_SYMBOL_EXTRA_BITS (1): cost of a symbol absent from a
+      histogram. 0 / 1 / 3 / 4 vs 2 measured 2026-10-27 at q5-11: 1 best,
+      qoi images q10 -0.17%, q11 -0.12% (dice q10 -1.24%), others within
+      -0.2% / +0.35% (D sources q6); 0 loses (testcard q9 +3.3%).
     - SPLIT_WARMUP (2000), SPLIT_WARMUP_START (77), SPLIT_WARMUP_SLOPE (7):
       cheaper switches at the start of a meta-block.
     - SPLIT_REFINE_FACTOR (2), SPLIT_REFINE_MIN (100): random samples that
