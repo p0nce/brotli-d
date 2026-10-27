@@ -86,14 +86,16 @@ Compression leftovers (small gains)
       refine the initial histograms.
 
     Levels 4-11: cost estimates and prefix codes
-    - ONE_SYMBOL_CODE_BITS (13), TWO_SYMBOLS_CODE_BITS (21),
-      THREE_SYMBOLS_CODE_BITS (29), FOUR_SYMBOLS_CODE_BITS (38),
-      COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (1): estimated
+    - ONE_SYMBOL_CODE_BITS (15), TWO_SYMBOLS_CODE_BITS (23),
+      THREE_SYMBOLS_CODE_BITS (31), FOUR_SYMBOLS_CODE_BITS (39),
+      COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0): estimated
       sizes of prefix codes in populationCost, used by every clustering,
-      split, context mode and distance parameter decision. Tuned +-1 each,
-      in that order (ad910a4..f05828a, from 12/20/28/37/18/2): 100 B
-      chunks -1.5% to -2.1%, larger inputs within +-0.1%. Steps of 2 or
-      more not tried; every kept value is at the edge of what was tried.
+      split, context mode and distance parameter decision. From
+      12/20/28/37/18/2: round 1 +-1 (ad910a4..f05828a), round 2 -2..+2
+      (1f4937d..578f981). 100 B chunks -2.9% to -4.7%, 1 KB about -0.1% to
+      -0.2%, larger inputs within +-0.2%. ONE, TWO and THREE kept +2 again:
+      not converged, try higher. FOUR and COMPLEX_CODE_BITS have a minimum
+      inside the range; COMPLEX_CODE_BITS_PER_DEPTH 0 vs 1 is within noise.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
     - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
 
