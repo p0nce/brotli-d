@@ -41,28 +41,84 @@ Compression leftovers (small gains)
 5. Tuning pass
 --------------
 [ ] Tune each @tuning constant, one by one, on the corpora, per level.
-    All change the output except TAGGED_MIN_LENGTH (speed only). Most
-    promising first:
-    1. METABLOCK_LENGTH (1 << 20), levels 0-9. (Levels 10-11 now choose
-       their meta-blocks, see SEGMENT_*: chunk 8 / 16 / 32 KB, penalty
-       380 / 510 / 765, max length 512 KB-4 MB swept on full inputs, 16 KB /
-       510 / 2 MB kept; the penalty is flat from 380 to 765.)
-    2. kSplitParams: switch costs, maxHistograms (100 / 50) and iterations
-       of the best splitter. Retune since 47fb668: block clustering may now
-       pay for more initial histograms or cheaper switches.
-    3. LITERAL_CONTEXT_WEIGHT / LITERAL_ORDER0_WEIGHT: the parser keeps more
-       literals than the reference's. Order-0 only (0 / 1): dice -0.24% at
-       window 24 but +0.14% at window 18. Try 1 / 2, per input kind.
-    4. kLevelParams q10-11: optimalPasses (4), optimalStarts (5),
-       optimalMaxLength (325), and OPTIMAL_FIRST_TRIED_PASS. On dice the
-       passes oscillate (321-322.7 KB over 10 passes), they don't converge.
-    5. MISSING_SYMBOL_EXTRA_BITS (parser) and ABSENT_SYMBOL_EXTRA_BITS
-       (splitter): the costs of absent symbols drive which symbols the
-       parser and splitter avoid; 2 is the reference's, never measured here.
-    6. RLE_STREAK_LIMIT, FULL_CLUSTERING_MAX_WORK, CLUSTER_BATCH: small,
-       header and clustering effects.
-    7. OMIT_FIRST_MIN_LENGTH (5): 4 / 5 / 6 / 8 were chaotic, +-0.1% per
-       file; 5 best summed over text, C, 5 KB.
+    All of them are open, including the ones already swept: re-test them
+    after related changes. All change the output except TAGGED_MIN_LENGTH
+    (speed only). Groups by the levels they affect; the order of groups and
+    within groups is a guess of the expected gain, not a verdict. What was
+    measured is noted as data.
+
+    Levels 10-11: optimal parsing
+    - kLevelParams q10 / q11: optimalPasses (2 / 4), optimalStarts (1 / 5),
+      optimalMaxLength (150 / 325), optimalKeepBest; OPTIMAL_FIRST_TRIED_PASS
+      (1). On dice the passes oscillate (321-322.7 KB over 10 passes), they
+      don't converge.
+    - LITERAL_CONTEXT_WEIGHT / LITERAL_ORDER0_WEIGHT (1 / 1): the parser
+      keeps more literals than the reference's. Order-0 only (0 / 1): dice
+      -0.24% at window 24 but +0.14% at window 18.
+    - MISSING_SYMBOL_EXTRA_BITS (2): cost of a symbol absent from the
+      previous pass. The reference's value, never measured here.
+    - INITIAL_COMMAND_COST_OFFSET (11), INITIAL_DISTANCE_COST_OFFSET (20):
+      costs of the first pass.
+    - MAX_TREE_SEARCH_DEPTH (64), MAX_TREE_COMP_LENGTH (128),
+      TREE_BUCKET_BITS (17), MAX_TREE_WINDOW (4 MB, 8 bytes of memory per
+      byte), SHORT_MATCH_SEARCH_DISTANCE (64): which matches the parser sees.
+    - OPTIMAL_MATCH_STARTS (2), START_MAX_COST_DIFF (0),
+      LONG_COPY_QUICK_STEP (16384): limits of the shortest path search.
+    - SEGMENT_CHUNK (16 KB), SEGMENT_PENALTY (510), SEGMENT_MAX_LENGTH
+      (2 MB): swept in 718d6a2 on full inputs, chunk 8 / 16 / 32 KB, penalty
+      380 / 510 / 765 (flat), max length 512 KB-4 MB (2 MB = 4 MB).
+    - OMIT_FIRST_MIN_LENGTH (5): 4 / 5 / 6 / 8 were chaotic, +-0.1% per
+      file; 5 best summed over text, C, 5 KB. 4 lost 0.04-0.08% on text and
+      C at q10.
+
+    Levels 5-11: block splitter
+    - kSplitParams, per category, fast (5-9) / best (10-11): maxHistograms
+      (16 / 100 literals, 50 others), symbolsPerHistogram, stride, minLength,
+      switchCost, iterations (2 / 10), clusterBlocks. Retune since 47fb668:
+      block clustering may now pay for more initial histograms or cheaper
+      switches. clusterBlocks in the fast splitter: -0.2% to -0.3% for 30-57%
+      of the speed (47fb668).
+    - ABSENT_SYMBOL_EXTRA_BITS (2): cost of a symbol absent from a
+      histogram. The reference's value, never measured here.
+    - SPLIT_WARMUP (2000), SPLIT_WARMUP_START (77), SPLIT_WARMUP_SLOPE (7):
+      cheaper switches at the start of a meta-block.
+    - SPLIT_REFINE_FACTOR (2), SPLIT_REFINE_MIN (100): random samples that
+      refine the initial histograms.
+
+    Levels 4-11: cost estimates and prefix codes
+    - ONE_SYMBOL_CODE_BITS (12), TWO_SYMBOLS_CODE_BITS (20),
+      THREE_SYMBOLS_CODE_BITS (28), FOUR_SYMBOLS_CODE_BITS (37),
+      COMPLEX_CODE_BITS (18), COMPLEX_CODE_BITS_PER_DEPTH (2): estimated
+      sizes of prefix codes in populationCost, used by every clustering,
+      split, context mode and distance parameter decision.
+    - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
+    - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
+
+    Levels 0-9: greedy and lazy parsing
+    - LITERAL_BYTE_SCORE (135), DISTANCE_BIT_PENALTY (30), MIN_SCORE_MARGIN
+      (100), LAST_DISTANCE_BONUS (15), SHORT_CODE_PENALTY (39),
+      LAZY_MATCH_MARGIN (175, levels 2-9): the match scores, which decide
+      every match. The reference's values, never measured here.
+    - kLevelParams q0-9: bucketBits, blockBits, numShortCodes, randomWindow,
+      lazyMatching, hashLength, and the features enabled at each level.
+    - DICTIONARY_THROTTLE_SHIFT (7, levels 2-11): when to stop looking up the
+      static dictionary.
+    - SKIP_NEAR_STEP (2), SKIP_NEAR_JUMP (8), SKIP_FAR_STEP (4),
+      SKIP_FAR_JUMP (16), SKIP_FAR_FACTOR (4): skipping on incompressible
+      data, speed and size on binary inputs.
+    - TEXT_HASH_MIN_LENGTH (16 KB), TEXT_UTF8_PERCENT (75),
+      TEXT_SAMPLE_LENGTH (64 KB): the 5-byte hash for text at levels 5-9
+      (cb38c2b: text -1.2% to -2.3%, C -0.2% to -0.9%).
+    - METABLOCK_LENGTH (1 MB). Meta-blocks chosen from the data at levels
+      5-9, measured 2026-10-27: -0.16% to -0.25% mean size, -1.4% to -6.5%
+      mean speed, level 9 D sources -44% speed; dropped.
+    - TAGGED_MIN_LENGTH (1 MB): speed only (afa1608: images +15% to +43%).
+
+    Levels 5-9: clustering
+    - FULL_CLUSTERING_MAX_WORK (1 << 22): above it, clusterLiteralsByContext
+      (8ec66c9: level 6 maps 2.9 -> 9.7 MB/s, size +0.13% at most). It is
+      per meta-block: inputs cut into more meta-blocks pay the full
+      clustering in each one.
 
 6. Finish
 ---------
