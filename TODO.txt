@@ -87,7 +87,10 @@ Compression leftovers (small gains)
       switchCost, iterations (2 / 10), clusterBlocks. Retune since 47fb668:
       block clustering may now pay for more initial histograms or cheaper
       switches. clusterBlocks in the fast splitter: -0.2% to -0.3% for 30-57%
-      of the speed (47fb668).
+      of the speed (47fb668). Best literal switchCost 28.1 -> 25.3 bits
+      (f4b8910, qoi images q10-11 -0.12%; 22.5 the same, 30.9 / 33.7 lose).
+      Next: commands and distances switch costs, maxHistograms, iterations,
+      then the fast splitter (levels 5-9).
     - ABSENT_SYMBOL_EXTRA_BITS (1): cost of a symbol absent from a
       histogram. 0 / 1 / 3 / 4 vs 2 measured 2026-10-27 at q5-11: 1 best,
       qoi images q10 -0.17%, q11 -0.12% (dice q10 -1.24%), others within
