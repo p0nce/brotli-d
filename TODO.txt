@@ -92,8 +92,8 @@ Compression leftovers (small gains)
       sizes of prefix codes in populationCost, used by every clustering,
       split, context mode and distance parameter decision. From
       12/20/28/37/18/2: round 1 +-1 (ad910a4..f05828a), round 2 -2..+2
-      (1f4937d..578f981). 100 B chunks -2.9% to -4.7%, 1 KB about -0.1% to
-      -0.2%, larger inputs within +-0.2%. ONE, TWO and THREE kept +2 again:
+      (1f4937d..578f981). 100 B chunks -2.3% to -4.6% (text -2.9%, C -4.1%
+      mean), 1 KB -0.04% to -0.30%, larger inputs within +-0.25%. ONE, TWO and THREE kept +2 again:
       not converged, try higher. FOUR and COMPLEX_CODE_BITS have a minimum
       inside the range; COMPLEX_CODE_BITS_PER_DEPTH 0 vs 1 is within noise.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
