@@ -86,11 +86,14 @@ Compression leftovers (small gains)
       refine the initial histograms.
 
     Levels 4-11: cost estimates and prefix codes
-    - ONE_SYMBOL_CODE_BITS (12), TWO_SYMBOLS_CODE_BITS (20),
-      THREE_SYMBOLS_CODE_BITS (28), FOUR_SYMBOLS_CODE_BITS (37),
-      COMPLEX_CODE_BITS (18), COMPLEX_CODE_BITS_PER_DEPTH (2): estimated
+    - ONE_SYMBOL_CODE_BITS (13), TWO_SYMBOLS_CODE_BITS (21),
+      THREE_SYMBOLS_CODE_BITS (29), FOUR_SYMBOLS_CODE_BITS (38),
+      COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (1): estimated
       sizes of prefix codes in populationCost, used by every clustering,
-      split, context mode and distance parameter decision.
+      split, context mode and distance parameter decision. Tuned +-1 each,
+      in that order (ad910a4..f05828a, from 12/20/28/37/18/2): 100 B
+      chunks -1.5% to -2.1%, larger inputs within +-0.1%. Steps of 2 or
+      more not tried; every kept value is at the edge of what was tried.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
     - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
 
