@@ -3347,8 +3347,8 @@ struct SplitParams
 
 @tuning static immutable SplitParams[2][3] kSplitParams =
 [
-    // Literals, commands, distances: [fast, best]. Switch costs: 28.1, 13.5, 14.6 bits.
-    [SplitParams(16, 544, 70, 128, 1841562, 2, false), SplitParams(100, 544, 70, 128, 1841562, 10, true)],
+    // Literals, commands, distances: [fast, best]. Switch costs: 28.1 (25.3 best), 13.5, 14.6 bits.
+    [SplitParams(16, 544, 70, 128, 1841562, 2, false), SplitParams(100, 544, 70, 128, 1657406, 10, true)],
     [SplitParams(16, 530, 40, 128, 884736, 2, false), SplitParams(50, 530, 40, 128, 884736, 10, true)],
     [SplitParams(16, 544, 40, 128, 956826, 2, false), SplitParams(50, 544, 40, 128, 956826, 10, true)],
 ];
