@@ -99,8 +99,9 @@ Compression leftovers (small gains)
       inputs within +-0.25%. Exact sizes per alphabet (4 + NSYM x alphabet
       bits) without offset: +0.44% vs 15/23/31/39.
       Open: an offset depending on the meta-block length (large for tiny
-      inputs), after seeing which decisions it changes at 100 B; then split
-      the offset back into the 4 constants and tune them one by one.
+      inputs), after seeing which decisions it changes at 100 B. Split back
+      into 4 constants (28/36/44/53) and tuned +-1 each: 29/37/43/54, -0.019%
+      in all (1 KB +0.005%), noise: kept the offset.
       COMPLEX_CODE_BITS has a minimum inside -2..+2; PER_DEPTH 0 vs 1 is
       within noise.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
