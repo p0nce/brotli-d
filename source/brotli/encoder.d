@@ -3336,7 +3336,7 @@ struct SplitParams
     bool clusterBlocks;         // cluster each block on its own, not the histograms (slower)
 }
 
-@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 2; // cost of a symbol absent from a histogram, above log2(total)
+@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 1; // cost of a symbol absent from a histogram, above log2(total)
 // Switches are cheaper at the beginning, where histograms are less reliable:
 // from START% of the switch cost, + SLOPE% each WARMUP symbols, until WARMUP.
 @tuning enum SPLIT_WARMUP = 2000;
