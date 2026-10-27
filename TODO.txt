@@ -86,20 +86,23 @@ Compression leftovers (small gains)
       refine the initial histograms.
 
     Levels 4-11: cost estimates and prefix codes
-    - ONE_SYMBOL_CODE_BITS (17), TWO_SYMBOLS_CODE_BITS (25),
-      THREE_SYMBOLS_CODE_BITS (33), FOUR_SYMBOLS_CODE_BITS (41),
-      COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0): estimated
-      sizes of prefix codes in populationCost, used by every clustering,
-      split, context mode and distance parameter decision. From
-      12/20/28/37/18/2 in 3 rounds (ad910a4..f05828a, 1f4937d..578f981,
-      round 3 on the first four). 100 B chunks -3.7% to -6.3% (text -4.0%,
-      C -5.6% mean), 1 KB -0.08% to -0.52%, 5 KB and larger inputs within
-      +-0.25%. Not converged: all four took +2 again in round 3, smaller
-      gains each round. They move together, about the exact sizes of
-      simple literal codes (12/20/28/37) + 4 or 5 bits.
+    - SIMPLE_CODE_EXTRA_BITS (16), COMPLEX_CODE_BITS (17),
+      COMPLEX_CODE_BITS_PER_DEPTH (0): estimated sizes of prefix codes in
+      populationCost, used by every clustering, split, context mode and
+      distance parameter decision. Simple codes are their exact sizes for
+      8-bit symbols (12/20/28/37) + SIMPLE_CODE_EXTRA_BITS. History: the 4
+      simple constants rose together over 3 rounds of +-2 (to 17/25/33/41),
+      then were replaced by the offset, swept 5-32: 16 gives 100 B -2.9%,
+      1 KB -0.13% vs 17/25/33/41; above 16 only 100 B gains (32: -3.7%)
+      and 5 KB+ lose up to +0.14%. In all, from 12/20/28/37/18/2: 100 B
+      -6.8% to -8.8% (text -6.9%, C -8.2%), 1 KB -0.15% to -0.74%, larger
+      inputs within +-0.25%. Exact sizes per alphabet (4 + NSYM x alphabet
+      bits) without offset: +0.44% vs 15/23/31/39.
+      Open: an offset depending on the meta-block length (large for tiny
+      inputs), after seeing which decisions it changes at 100 B; then split
+      the offset back into the 4 constants and tune them one by one.
       COMPLEX_CODE_BITS has a minimum inside -2..+2; PER_DEPTH 0 vs 1 is
-      within noise. Exact sizes per alphabet (4 + NSYM x alphabet bits, +1
-      for 4 symbols) instead of the 4 constants: +0.44% vs round 2.
+      within noise.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
     - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
 
