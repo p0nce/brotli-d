@@ -63,7 +63,10 @@ Compression leftovers (small gains)
       keeps more literals than the reference's. Order-0 only (0 / 1): dice
       -0.24% at window 24 but +0.14% at window 18.
     - MISSING_SYMBOL_EXTRA_BITS (2): cost of a symbol absent from the
-      previous pass. The reference's value, never measured here.
+      previous pass. 0 / 1 / 3 / 4 measured 2026-10-27 vs 2 (q10-11: each
+      qoi image, 256 KB prefixes, small chunks): no value wins everywhere,
+      all within +-0.1% in total bytes per group; dice q11 +0.3% to +0.5%
+      with every other value. Kept 2.
     - INITIAL_COMMAND_COST_OFFSET (11), INITIAL_DISTANCE_COST_OFFSET (20):
       costs of the first pass.
     - MAX_TREE_SEARCH_DEPTH (64), MAX_TREE_COMP_LENGTH (128),
