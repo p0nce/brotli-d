@@ -1,6 +1,12 @@
 Brotli encoder: remaining work
 ==============================
 
+Rules
+-----
+- When the first measurement of a change looks marginal (small gain, or a
+  speed cost that fails the per-level rate), show the numbers and ask
+  whether it is worth pursuing, before profiling or tuning it.
+
 Compression leftovers (small gains)
 --------------------------------------
 [ ] Level 11 on small inputs (+0.7% vs q11): look at header/tree costs,
