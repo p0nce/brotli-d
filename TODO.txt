@@ -86,16 +86,20 @@ Compression leftovers (small gains)
       refine the initial histograms.
 
     Levels 4-11: cost estimates and prefix codes
-    - ONE_SYMBOL_CODE_BITS (15), TWO_SYMBOLS_CODE_BITS (23),
-      THREE_SYMBOLS_CODE_BITS (31), FOUR_SYMBOLS_CODE_BITS (39),
+    - ONE_SYMBOL_CODE_BITS (17), TWO_SYMBOLS_CODE_BITS (25),
+      THREE_SYMBOLS_CODE_BITS (33), FOUR_SYMBOLS_CODE_BITS (41),
       COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0): estimated
       sizes of prefix codes in populationCost, used by every clustering,
       split, context mode and distance parameter decision. From
-      12/20/28/37/18/2: round 1 +-1 (ad910a4..f05828a), round 2 -2..+2
-      (1f4937d..578f981). 100 B chunks -2.3% to -4.6% (text -2.9%, C -4.1%
-      mean), 1 KB -0.04% to -0.30%, larger inputs within +-0.25%. ONE, TWO and THREE kept +2 again:
-      not converged, try higher. FOUR and COMPLEX_CODE_BITS have a minimum
-      inside the range; COMPLEX_CODE_BITS_PER_DEPTH 0 vs 1 is within noise.
+      12/20/28/37/18/2 in 3 rounds (ad910a4..f05828a, 1f4937d..578f981,
+      round 3 on the first four). 100 B chunks -3.7% to -6.3% (text -4.0%,
+      C -5.6% mean), 1 KB -0.08% to -0.52%, 5 KB and larger inputs within
+      +-0.25%. Not converged: all four took +2 again in round 3, smaller
+      gains each round. They move together, about the exact sizes of
+      simple literal codes (12/20/28/37) + 4 or 5 bits.
+      COMPLEX_CODE_BITS has a minimum inside -2..+2; PER_DEPTH 0 vs 1 is
+      within noise. Exact sizes per alphabet (4 + NSYM x alphabet bits, +1
+      for 4 symbols) instead of the 4 constants: +0.44% vs round 2.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
     - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
 
