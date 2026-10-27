@@ -2093,7 +2093,7 @@ ulong bitsEntropy(scope const(uint)[] h)
 @tuning enum ulong ONE_SYMBOL_CODE_BITS = 17;
 @tuning enum ulong TWO_SYMBOLS_CODE_BITS = 25;
 @tuning enum ulong THREE_SYMBOLS_CODE_BITS = 33;
-@tuning enum ulong FOUR_SYMBOLS_CODE_BITS = 39;
+@tuning enum ulong FOUR_SYMBOLS_CODE_BITS = 41;
 @tuning enum ulong COMPLEX_CODE_BITS = 17;
 @tuning enum ulong COMPLEX_CODE_BITS_PER_DEPTH = 0; // per bit of the longest code
 
