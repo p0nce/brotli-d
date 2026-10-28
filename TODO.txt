@@ -79,9 +79,6 @@ Compression leftovers (small gains)
       kind loses).
     - MISSING_SYMBOL_EXTRA_BITS (2, q10-11): re-scored, 1 wins on every
       kind (-0.017%); re-run on the new panel (in progress 2026-10-28).
-    - The ones measured flat with the old scoring: best commands /
-      distances switchCost, best literal maxHistograms and iterations, fast
-      literal switchCost.
     - SEGMENT_CHUNK / SEGMENT_PENALTY / SEGMENT_MAX_LENGTH (q10-11),
       OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
 
