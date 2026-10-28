@@ -77,8 +77,12 @@ Compression leftovers (small gains)
       +0.015%.
     - Best literal switchCost (25.3 bits, q10-11): re-scored, holds (no
       kind loses).
-    - MISSING_SYMBOL_EXTRA_BITS (2, q10-11): re-scored, 1 wins on every
-      kind (-0.017%); re-run on the new panel (in progress 2026-10-28).
+    - [x] MISSING_SYMBOL_EXTRA_BITS (2, q10-11): revalidated 2026-10-28,
+      kept 2. 1 scores -0.030%, but only from web q10 (-1.01%) and binary
+      q10 (-0.42%); at q10 it costs qoi +0.25%, code +0.15%, other images
+      +0.14%, tiny +0.14%, and most kinds +0.03% to +0.11% at q11. 0 / 3 /
+      4: +0.029% / +0.029% / +0.079%. The offline re-score (1 wins on
+      every kind) was wrong.
     - SEGMENT_CHUNK / SEGMENT_PENALTY / SEGMENT_MAX_LENGTH (q10-11),
       OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
 
