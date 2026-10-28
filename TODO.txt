@@ -70,8 +70,10 @@ Compression leftovers (small gains)
     None of these is revalidated yet. "Re-scored" below means the new
     score applied to the sizes saved by the old runs (old inputs only, and
     the encoder as it was at that run): a hint, not a measurement.
-    - SIMPLE_CODE_EXTRA_BITS (16, q4-11): re-scored offline, 20 beats 16
-      (-0.544% vs -0.489% vs 17/25/33/41; only tiny inputs move).
+    - [x] SIMPLE_CODE_EXTRA_BITS (16, q4-11): revalidated 2026-10-28, kept
+      16. 14: tiny +0.19%. 18 / 20 / 24: tiny -0.24% / -0.34% / -0.50% but
+      web +0.12% / +0.14% / +0.12% (tailwind CSS q10 +1.3% to +1.7%); other
+      kinds within +0.011%. 16 is where neither tiny nor web loses.
     - COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0), q4-11.
     - ABSENT_SYMBOL_EXTRA_BITS (1, q5-11): re-scored, still best but code
       +0.015%.
