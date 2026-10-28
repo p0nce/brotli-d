@@ -75,8 +75,10 @@ Compression leftovers (small gains)
       web +0.12% / +0.14% / +0.12% (tailwind CSS q10 +1.3% to +1.7%); other
       kinds within +0.011%. 16 is where neither tiny nor web loses.
     - COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0), q4-11.
-    - ABSENT_SYMBOL_EXTRA_BITS (1, q5-11): re-scored, still best but code
-      +0.015%.
+    - [x] ABSENT_SYMBOL_EXTRA_BITS (1, q5-11): revalidated 2026-10-28, kept
+      1. 0 / 2 / 3: +0.016% (code +0.074%) / +0.063% (web +0.457%) /
+      +0.031% (web +0.112%). The change from 2 also helps web, which
+      was not in the panel when it was made.
     - Best literal switchCost (25.3 bits, q10-11): re-scored, holds (no
       kind loses).
     - [x] MISSING_SYMBOL_EXTRA_BITS (2, q10-11): revalidated 2026-10-28,
