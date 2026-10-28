@@ -83,8 +83,11 @@ Compression leftovers (small gains)
       1. 0 / 2 / 3: +0.016% (code +0.074%) / +0.063% (web +0.457%) /
       +0.031% (web +0.112%). The change from 2 also helps web, which
       was not in the panel when it was made.
-    - Best literal switchCost (25.3 bits, q10-11): re-scored, holds (no
-      kind loses).
+    - [x] Best literal switchCost (25.3 bits, q10-11): revalidated
+      2026-10-29, kept 25.3. 22.5 / 23.9 / 26.7 / 28.1 bits: -0.008% /
+      -0.002% / +0.021% / +0.038%. Below 25.3 qoi loses (+0.034% /
+      +0.082%) while audio, binary and web gain about as much; above,
+      most kinds lose.
     - [x] MISSING_SYMBOL_EXTRA_BITS (2, q10-11): revalidated 2026-10-28,
       kept 2. 1 scores -0.030%, but only from web q10 (-1.01%) and binary
       q10 (-0.42%); at q10 it costs qoi +0.25%, code +0.15%, other images
