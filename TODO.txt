@@ -97,10 +97,11 @@ Compression leftovers (small gains)
       Best literal iterations (10) at 11 / 12 / 13, 2026-10-28: qoi images
       within +-0.06% (dice q10 -0.15% to -0.27%), 256 KB prefixes q10
       +0.05% to +0.12%; kept 10. Lower values not tried.
-      NEXT: fast literal switchCost (28.1 bits, levels 5-9) at -20% / -10% /
-      +10% / +20%, each qoi image on its own; the best one's switch cost gave
-      qoi -0.12% at q10-11 (f4b8910). Then the fast maxHistograms (16) and
-      iterations (2), which also cost speed.
+      Fast literal switchCost (28.1 bits, levels 5-9) at 22.5 / 25.3 / 30.9
+      / 33.7, 2026-10-28: flat. 22.5: qoi images q5 -0.11% to q9 -0.04%,
+      but dice +0.24%; other inputs within +-0.05%; as many cells worse as
+      better at every value. Kept 28.1. Open: the fast maxHistograms (16)
+      and iterations (2), which also cost speed.
     - ABSENT_SYMBOL_EXTRA_BITS (1): cost of a symbol absent from a
       histogram. 0 / 1 / 3 / 4 vs 2 measured 2026-10-27 at q5-11: 1 best,
       qoi images q10 -0.17%, q11 -0.12% (dice q10 -1.24%), others within
