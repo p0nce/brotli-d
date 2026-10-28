@@ -60,6 +60,28 @@ Compression leftovers (small gains)
     within groups is a guess of the expected gain, not a verdict. What was
     measured is noted as data.
 
+[ ] Revalidate past choices on the balanced panel (2026-10-28): the goal is
+    a general encoder; score = mean over kinds of data (text, code, web,
+    binary, audio, qoi, other images, tiny 100 B, small 1-5 KB) of the
+    change in total bytes, duplicates dropped. Earlier choices used the
+    mean % over all cells (small chunks 24% of them, qoi favored, dice.qoi
+    counted 3 times) and predate the new inputs (web, CJK, exe, WAV, SVG,
+    PNG, sqz, qoix). Measure again, one at a time, at the levels each acts:
+    - SIMPLE_CODE_EXTRA_BITS (16, q4-11): re-scored offline, 20 beats 16
+      (-0.544% vs -0.489% vs 17/25/33/41; only tiny inputs move).
+    - COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0), q4-11.
+    - ABSENT_SYMBOL_EXTRA_BITS (1, q5-11): re-scored, still best but code
+      +0.015%.
+    - Best literal switchCost (25.3 bits, q10-11): re-scored, holds (no
+      kind loses).
+    - MISSING_SYMBOL_EXTRA_BITS (2, q10-11): re-scored, 1 wins on every
+      kind (-0.017%); re-run on the new panel (in progress 2026-10-28).
+    - The ones measured flat with the old scoring: best commands /
+      distances switchCost, best literal maxHistograms and iterations, fast
+      literal switchCost.
+    - SEGMENT_CHUNK / SEGMENT_PENALTY / SEGMENT_MAX_LENGTH (q10-11),
+      OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
+
     Levels 10-11: optimal parsing
     - kLevelParams q10 / q11: optimalPasses (2 / 4), optimalStarts (1 / 5),
       optimalMaxLength (150 / 325), optimalKeepBest; OPTIMAL_FIRST_TRIED_PASS
