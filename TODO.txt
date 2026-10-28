@@ -66,7 +66,10 @@ Compression leftovers (small gains)
     change in total bytes, duplicates dropped. Earlier choices used the
     mean % over all cells (small chunks 24% of them, qoi favored, dice.qoi
     counted 3 times) and predate the new inputs (web, CJK, exe, WAV, SVG,
-    PNG, sqz, qoix). Measure again, one at a time, at the levels each acts:
+    PNG, sqz, qoix). Measure again, one at a time, at the levels each acts.
+    None of these is revalidated yet. "Re-scored" below means the new
+    score applied to the sizes saved by the old runs (old inputs only, and
+    the encoder as it was at that run): a hint, not a measurement.
     - SIMPLE_CODE_EXTRA_BITS (16, q4-11): re-scored offline, 20 beats 16
       (-0.544% vs -0.489% vs 17/25/33/41; only tiny inputs move).
     - COMPLEX_CODE_BITS (17), COMPLEX_CODE_BITS_PER_DEPTH (0), q4-11.
