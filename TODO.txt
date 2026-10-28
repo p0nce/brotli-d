@@ -94,8 +94,10 @@ Compression leftovers (small gains)
       Best literal maxHistograms (100) at 64 / 80 / 128 / 160, 2026-10-28:
       all larger, qoi images q10 +0.05% to +0.10%, q11 +0.05% to +0.09%
       (single images -0.2% to +0.4%), 256 KB prefixes up to +0.30%; kept.
-      Next: iterations (10 best, 2 fast), then the fast splitter (levels
-      5-9).
+      Best literal iterations (10) at 11 / 12 / 13, 2026-10-28: qoi images
+      within +-0.06% (dice q10 -0.15% to -0.27%), 256 KB prefixes q10
+      +0.05% to +0.12%; kept 10. Lower values not tried.
+      Next: the fast splitter (levels 5-9).
     - ABSENT_SYMBOL_EXTRA_BITS (1): cost of a symbol absent from a
       histogram. 0 / 1 / 3 / 4 vs 2 measured 2026-10-27 at q5-11: 1 best,
       qoi images q10 -0.17%, q11 -0.12% (dice q10 -1.24%), others within
