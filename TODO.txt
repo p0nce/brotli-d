@@ -60,16 +60,16 @@ Compression leftovers (small gains)
     within groups is a guess of the expected gain, not a verdict. What was
     measured is noted as data.
 
-[ ] Revalidate past choices on the balanced panel (2026-10-28): the goal is
+[x] Revalidate past choices on the balanced panel (2026-10-28): the goal is
     a general encoder; score = mean over kinds of data (text, code, web,
     binary, audio, qoi, other images, tiny 100 B, small 1-5 KB) of the
     change in total bytes, duplicates dropped. Earlier choices used the
     mean % over all cells (small chunks 24% of them, qoi favored, dice.qoi
     counted 3 times) and predate the new inputs (web, CJK, exe, WAV, SVG,
     PNG, sqz, qoix). Measure again, one at a time, at the levels each acts.
-    None of these is revalidated yet. "Re-scored" below means the new
-    score applied to the sizes saved by the old runs (old inputs only, and
-    the encoder as it was at that run): a hint, not a measurement.
+    All revalidated by 2026-10-29: only COMPLEX_CODE_BITS and its
+    PER_DEPTH changed. Offline re-scores of old runs were hints, and
+    two of them were wrong.
     - [x] SIMPLE_CODE_EXTRA_BITS (16, q4-11): revalidated 2026-10-28, kept
       16. 14: tiny +0.19%. 18 / 20 / 24: tiny -0.24% / -0.34% / -0.50% but
       web +0.12% / +0.14% / +0.12% (tailwind CSS q10 +1.3% to +1.7%); other
@@ -100,7 +100,9 @@ Compression leftovers (small gains)
       +0.10% above 16 KB). Penalty 255 / 380 / 640 / 765: +0.122% /
       -0.007% (binary +0.081%) / +0.069% / +0.069%; web (CSS q10)
       swings +-1%. Max length 1 / 4 MB: no effect on any input.
-    - OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
+    - [x] OMIT_FIRST_MIN_LENGTH (q10-11): revalidated 2026-10-29, kept 5.
+      4 / 6 / 8: -0.001% (noise, web +0.017%) / +0.058% / +0.150%
+      (tiny +0.50% at 8).
 
     Levels 10-11: optimal parsing
     - kLevelParams q10 / q11: optimalPasses (2 / 4), optimalStarts (1 / 5),
