@@ -94,8 +94,13 @@ Compression leftovers (small gains)
       +0.14%, tiny +0.14%, and most kinds +0.03% to +0.11% at q11. 0 / 3 /
       4: +0.029% / +0.029% / +0.079%. The offline re-score (1 wins on
       every kind) was wrong.
-    - SEGMENT_CHUNK / SEGMENT_PENALTY / SEGMENT_MAX_LENGTH (q10-11),
-      OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
+    - [x] SEGMENT_CHUNK / SEGMENT_PENALTY / SEGMENT_MAX_LENGTH (q10-11):
+      revalidated 2026-10-29, kept 16 KB / 510 / 2 MB. Chunk 8 / 32 /
+      64 KB: +0.083% / +0.026% / +0.003% (web +1.08% at 8 KB, code
+      +0.10% above 16 KB). Penalty 255 / 380 / 640 / 765: +0.122% /
+      -0.007% (binary +0.081%) / +0.069% / +0.069%; web (CSS q10)
+      swings +-1%. Max length 1 / 4 MB: no effect on any input.
+    - OMIT_FIRST_MIN_LENGTH (q10-11): tuned on the old corpus only.
 
     Levels 10-11: optimal parsing
     - kLevelParams q10 / q11: optimalPasses (2 / 4), optimalStarts (1 / 5),
