@@ -2097,7 +2097,7 @@ enum ulong ONE_SYMBOL_CODE_BITS = 12 + SIMPLE_CODE_EXTRA_BITS;
 enum ulong TWO_SYMBOLS_CODE_BITS = 20 + SIMPLE_CODE_EXTRA_BITS;
 enum ulong THREE_SYMBOLS_CODE_BITS = 28 + SIMPLE_CODE_EXTRA_BITS;
 enum ulong FOUR_SYMBOLS_CODE_BITS = 37 + SIMPLE_CODE_EXTRA_BITS;
-@tuning enum ulong COMPLEX_CODE_BITS = 18;
+@tuning enum ulong COMPLEX_CODE_BITS = 20;
 @tuning enum ulong COMPLEX_CODE_BITS_PER_DEPTH = 1; // per bit of the longest code
 
 // Estimated size of symbols coded with a prefix code, including the
