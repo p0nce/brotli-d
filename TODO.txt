@@ -76,9 +76,15 @@ Compression leftovers (small gains)
       kinds within +0.011%. 16 is where neither tiny nor web loses.
     - [x] COMPLEX_CODE_BITS 17 -> 18, then COMPLEX_CODE_BITS_PER_DEPTH 0 -> 1
       (revalidated 2026-10-28, q4-11): -0.020% then -0.043%, no kind worse
-      than +0.005%. Both undo noise-level picks of rounds 1-2. 18 is at the
-      edge of what was tried (16 / 18), PER_DEPTH 1 too (only 1 tried):
-      try 19-20 and PER_DEPTH 2.
+      than +0.005%. Both undo noise-level picks of rounds 1-2.
+      Then (2026-10-30, the mean over kinds decides, a kind getting worse is
+      no veto): COMPLEX_CODE_BITS 18 -> 20 (19 / 20: -0.005% / -0.012%,
+      tiny -0.091%), PER_DEPTH 1 -> 3 (2 / 3: -0.026% / -0.035%; at 3 tiny
+      -0.195%, web -0.107%, qoi +0.022%, audio +0.013%). Round 2 on top of
+      20 / 3: PER_DEPTH 4 / 5 +0.009% / +0.015% (tiny +0.061% / +0.140%),
+      kept 3; COMPLEX_CODE_BITS 17 / 18 / 19 / 21 / 22: +0.005% / +0.005% /
+      +0.003% / -0.002% / -0.004% (each step up: tiny gains ~0.02%, web
+      loses ~0.004%), noise, kept 20.
     - [x] ABSENT_SYMBOL_EXTRA_BITS (1, q5-11): revalidated 2026-10-28, kept
       1. 0 / 2 / 3: +0.016% (code +0.074%) / +0.063% (web +0.457%) /
       +0.031% (web +0.112%). The change from 2 also helps web, which
@@ -162,8 +168,8 @@ Compression leftovers (small gains)
       refine the initial histograms.
 
     Levels 4-11: cost estimates and prefix codes
-    - SIMPLE_CODE_EXTRA_BITS (16), COMPLEX_CODE_BITS (18),
-      COMPLEX_CODE_BITS_PER_DEPTH (1): estimated sizes of prefix codes in
+    - SIMPLE_CODE_EXTRA_BITS (16), COMPLEX_CODE_BITS (20),
+      COMPLEX_CODE_BITS_PER_DEPTH (3): estimated sizes of prefix codes in
       populationCost, used by every clustering, split, context mode and
       distance parameter decision. Simple codes are their exact sizes for
       8-bit symbols (12/20/28/37) + SIMPLE_CODE_EXTRA_BITS. History: the 4
@@ -178,8 +184,8 @@ Compression leftovers (small gains)
       inputs), after seeing which decisions it changes at 100 B. Split back
       into 4 constants (28/36/44/53) and tuned +-1 each: 29/37/43/54, -0.019%
       in all (1 KB +0.005%), noise: kept the offset.
-      COMPLEX_CODE_BITS has a minimum inside -2..+2; PER_DEPTH 0 vs 1 is
-      within noise.
+      COMPLEX_CODE_BITS 20 and PER_DEPTH 3 measured 2026-10-30 (see the
+      revalidation above): PER_DEPTH has a minimum at 3, BITS is flat above 20.
     - RLE_STREAK_LIMIT (1240 / 256): optimizeHistogramForRle.
     - CLUSTER_BATCH (64): clusterMany with more than 256 histograms.
 
