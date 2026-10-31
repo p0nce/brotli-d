@@ -38,6 +38,7 @@ module brotli.encoder;
 
 import core.bitop : bsf, bsr;
 import inteli.emmintrin;
+import inteli.smmintrin;
 import brotli.decoder;
 
 @safe pure nothrow @nogc:
@@ -3361,12 +3362,111 @@ uint nextRandom(ref uint seed)
     return seed;
 }
 
+// Above any cost of a real histogram (log2 of a count + switch cost), and
+// still far from int.max when added once more.
+enum uint SPLIT_PADDING_COST = 1 << 26;
+
+// The forward pass of findBlocks, 4 histograms per vector: N vectors, or
+// numVectors if N is 0. costs: cost of the best path ending with each
+// histogram, relative to the best path. Capped at the switch cost: then the
+// path switches from the best one, and switchSignal records it. Costs stay
+// below 2^31: signed comparisons are the unsigned ones.
+void findBestPaths(size_t N)(scope const(ushort)[] symbols, scope const(uint)[] insertCost,
+                             size_t numVectors, uint switchCost, scope ubyte[] blockIds,
+                             scope ubyte[] switchSignal, size_t bitmapLength) @trusted
+{
+    static if (N > 0)
+        enum size_t nv = N;
+    else
+        size_t nv = numVectors;
+    if (nv > 64 || (nv + 1) / 2 > bitmapLength)
+        assert(0);
+    // With N > 0 the loops over vectors are unrolled, and the costs stay in
+    // registers.
+    __m128i[N > 0 ? N : 64] costs;
+    foreach (v; 0 .. nv)
+        costs[v] = _mm_setzero_si128();
+    foreach (i, sym; symbols)
+    {
+        const(uint)[] row = insertCost[sym * nv * 4 .. (sym + 1) * nv * 4];
+        const(__m128i)* ic = cast(const(__m128i)*) row.ptr;
+        uint sc = switchCost;
+        if (i < SPLIT_WARMUP)
+            sc = cast(uint)(cast(ulong) switchCost * (SPLIT_WARMUP_START * SPLIT_WARMUP + SPLIT_WARMUP_SLOPE * i)
+                            / (100 * SPLIT_WARMUP));
+        __m128i scv = _mm_set1_epi32(sc);
+        ubyte[] signal = switchSignal[i * bitmapLength .. (i + 1) * bitmapLength];
+        uint best = 0;
+        static if (N > 0)
+        {
+            static foreach (v; 0 .. N)
+                costs[v] = _mm_add_epi32(costs[v], _mm_loadu_si128(ic + v));
+            // Minimum in a balanced tree, then in every lane.
+            static if (N == 1)
+                __m128i m = costs[0];
+            else static if (N == 2)
+                __m128i m = _mm_min_epi32(costs[0], costs[1]);
+            else static if (N == 3)
+                __m128i m = _mm_min_epi32(_mm_min_epi32(costs[0], costs[1]), costs[2]);
+            else
+                __m128i m = _mm_min_epi32(_mm_min_epi32(costs[0], costs[1]), _mm_min_epi32(costs[2], costs[3]));
+            m = _mm_min_epi32(m, _mm_shuffle_epi32!0x4E(m));
+            m = _mm_min_epi32(m, _mm_shuffle_epi32!0xB1(m));
+
+            // The first histogram with the lowest cost, and the capped costs.
+            uint equal = 0;
+            uint capped = 0;
+            static foreach (v; 0 .. N)
+            {{
+                equal |= _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(costs[v], m))) << (4 * v);
+                __m128i d = _mm_sub_epi32(costs[v], m);
+                capped |= (~_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(scv, d))) & 15) << (4 * v);
+                costs[v] = _mm_min_epi32(d, scv);
+            }}
+            best = bsf(equal);
+            static foreach (b; 0 .. (N + 1) / 2)
+                signal[b] = cast(ubyte)(capped >> (8 * b));
+        }
+        else
+        {
+            __m128i m = _mm_set1_epi32(int.max);
+            foreach (v; 0 .. nv)
+            {
+                costs[v] = _mm_add_epi32(costs[v], _mm_loadu_si128(ic + v));
+                m = _mm_min_epi32(m, costs[v]);
+            }
+            m = _mm_min_epi32(m, _mm_shuffle_epi32!0x4E(m));
+            m = _mm_min_epi32(m, _mm_shuffle_epi32!0xB1(m)); // the minimum in every lane
+            foreach (v; 0 .. nv)
+            {
+                int equal = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(costs[v], m)));
+                if (equal != 0)
+                {
+                    best = cast(uint)(4 * v + bsf(equal));
+                    break;
+                }
+            }
+            foreach (v; 0 .. nv)
+            {
+                __m128i d = _mm_sub_epi32(costs[v], m);
+                uint capped = ~_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(scv, d))) & 15;
+                costs[v] = _mm_min_epi32(d, scv);
+                if (v & 1)
+                    signal[v >> 1] |= cast(ubyte)(capped << 4);
+                else
+                    signal[v >> 1] = cast(ubyte) capped;
+            }
+        }
+        blockIds[i] = cast(ubyte) best;
+    }
+}
+
 // Assign each symbol to the histogram that codes it best, with a cost for
 // switching histograms (Viterbi). Writes the histogram of each symbol to
 // blockIds.
 void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(uint)[] histograms,
                 size_t numHistograms, uint switchCost, scope ubyte[] blockIds,
-                scope ubyte[] switchSignal, scope uint[] insertCost, scope uint[] cost)
+                scope ubyte[] switchSignal, scope uint[] insertCost)
 {
     size_t n = symbols.length;
     if (numHistograms == 1)
@@ -3375,7 +3475,10 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
         return;
     }
     // Cost of each symbol with each histogram: absent symbols cost a bit more
-    // than the rarest.
+    // than the rarest. Rows of 4 lanes per vector; the padding lanes never
+    // have the lowest cost.
+    size_t numVectors = (numHistograms + 3) >> 2;
+    size_t stride = numVectors * 4;
     foreach (k; 0 .. numHistograms)
     {
         const(uint)[] h = histograms[k * alphabetSize .. (k + 1) * alphabetSize];
@@ -3384,48 +3487,20 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
             total += c;
         uint log2Total = log2Fixed(cast(size_t) total);
         foreach (s, c; h)
-            insertCost[s * numHistograms + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_ONE_BIT
-                                                        : log2Total - log2Fixed(c);
+            insertCost[s * stride + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_ONE_BIT
+                                                 : log2Total - log2Fixed(c);
     }
+    foreach (s; 0 .. alphabetSize)
+        insertCost[s * stride + numHistograms .. (s + 1) * stride] = SPLIT_PADDING_COST;
 
-    // cost[k]: cost of the best path ending with histogram k, relative to
-    // the best path. Capped at switchCost: then the path switches from the
-    // best one, and switchSignal records it.
-    // (The loops are branch-free, for vectorization.)
     size_t bitmapLength = (numHistograms + 7) >> 3;
-    uint[] costs = cost[0 .. numHistograms];
-    costs[] = 0;
-    foreach (i, sym; symbols)
+    switch (numVectors)
     {
-        const(uint)[] ic = insertCost[sym * numHistograms .. (sym + 1) * numHistograms];
-        uint minCost = uint.max;
-        foreach (k, ref c; costs)
-        {
-            c += ic[k];
-            minCost = c < minCost ? c : minCost;
-        }
-        uint best = 0;
-        while (costs[best] != minCost)
-            best++;
-        blockIds[i] = cast(ubyte) best;
-        uint sc = switchCost;
-        if (i < SPLIT_WARMUP)
-            sc = cast(uint)(cast(ulong) switchCost * (SPLIT_WARMUP_START * SPLIT_WARMUP + SPLIT_WARMUP_SLOPE * i)
-                            / (100 * SPLIT_WARMUP));
-        ubyte[] signal = switchSignal[i * bitmapLength .. (i + 1) * bitmapLength];
-        for (size_t k8 = 0; k8 < numHistograms; k8 += 8)
-        {
-            uint[] group = costs[k8 .. (k8 + 8 < numHistograms ? k8 + 8 : numHistograms)];
-            uint bits = 0;
-            foreach (j, ref c; group)
-            {
-                uint d = c - minCost;
-                uint capped = d >= sc;
-                c = capped ? sc : d;
-                bits |= capped << j;
-            }
-            signal[k8 >> 3] = cast(ubyte) bits;
-        }
+        case 1: findBestPaths!1(symbols, insertCost, numVectors, switchCost, blockIds, switchSignal, bitmapLength); break;
+        case 2: findBestPaths!2(symbols, insertCost, numVectors, switchCost, blockIds, switchSignal, bitmapLength); break;
+        case 3: findBestPaths!3(symbols, insertCost, numVectors, switchCost, blockIds, switchSignal, bitmapLength); break;
+        case 4: findBestPaths!4(symbols, insertCost, numVectors, switchCost, blockIds, switchSignal, bitmapLength); break;
+        default: findBestPaths!0(symbols, insertCost, numVectors, switchCost, blockIds, switchSignal, bitmapLength); break;
     }
 
     // Trace back the best path.
@@ -3456,12 +3531,11 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
     if (!ws.splitHistograms.ensure(numHistograms * alphabetSize)
         || !ws.splitBlockIds.ensure(n)
         || !ws.splitSignal.ensure(n * bitmapLength)
-        || !ws.splitInsertCost.ensure(numHistograms * alphabetSize)
+        || !ws.splitInsertCost.ensure(((numHistograms + 3) & ~3) * alphabetSize)
         || !ws.reserveClustering(numHistograms, alphabetSize))
         return oom;
     uint[] histograms = ws.splitHistograms;
     ubyte[] blockIds = ws.splitBlockIds[0 .. n];
-    uint[256] cost;
 
     // Initial histograms: a sample of each part of the data, then more
     // random samples.
@@ -3498,7 +3572,7 @@ BrotliStatus splitSymbols(scope const(ushort)[] symbols, size_t alphabetSize,
     foreach (iteration; 0 .. p.iterations)
     {
         findBlocks(symbols, alphabetSize, histograms, numHistograms, p.switchCost, blockIds,
-                   ws.splitSignal, ws.splitInsertCost, cost[]);
+                   ws.splitSignal, ws.splitInsertCost);
         ushort[256] newId = ushort.max;
         size_t numUsed = 0;
         foreach (ref id; blockIds)
