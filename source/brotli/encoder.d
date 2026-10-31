@@ -3414,16 +3414,25 @@ void findBestPaths(size_t N)(scope const(ushort)[] symbols, scope const(uint)[] 
             m = _mm_min_epi32(m, _mm_shuffle_epi32!0xB1(m));
 
             // The first histogram with the lowest cost, and the capped costs.
-            uint equal = 0;
-            uint capped = 0;
+            // Masks as sums of lane weights (no movemask on NEON): bit k for
+            // lane k equal to the minimum, bit 16 + k for lane k not capped.
+            __m128i bits = _mm_setzero_si128();
             static foreach (v; 0 .. N)
             {{
-                equal |= _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(costs[v], m))) << (4 * v);
                 __m128i d = _mm_sub_epi32(costs[v], m);
-                capped |= (~_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpgt_epi32(scv, d))) & 15) << (4 * v);
+                bits = _mm_or_si128(bits, _mm_and_si128(_mm_cmpeq_epi32(costs[v], m),
+                                                        _mm_setr_epi32(1 << (4 * v), 2 << (4 * v),
+                                                                       4 << (4 * v), 8 << (4 * v))));
+                bits = _mm_or_si128(bits, _mm_and_si128(_mm_cmpgt_epi32(scv, d),
+                                                        _mm_setr_epi32(0x10000 << (4 * v), 0x20000 << (4 * v),
+                                                                       0x40000 << (4 * v), 0x80000 << (4 * v))));
                 costs[v] = _mm_min_epi32(d, scv);
             }}
-            best = bsf(equal);
+            bits = _mm_add_epi32(bits, _mm_shuffle_epi32!0x4E(bits));
+            bits = _mm_add_epi32(bits, _mm_shuffle_epi32!0xB1(bits));
+            uint lanes = _mm_cvtsi128_si32(bits);
+            best = bsf(lanes & 0xFFFF);
+            uint capped = ~(lanes >> 16);
             static foreach (b; 0 .. (N + 1) / 2)
                 signal[b] = cast(ubyte)(capped >> (8 * b));
         }
