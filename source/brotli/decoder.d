@@ -138,9 +138,11 @@ void freeArray(T)(ref T[] arr) @system
     arr = null;
 }
 
-// A malloc'ed array, freed by its destructor. It can't be copied, and its
-// memory is only reachable through it, which makes it safe to use.
-// Resizing moves the elements: a slice of it must not be used after that.
+// A malloc'ed array, freed by its destructor. It can't be copied.
+// Not memory-safe: its slices (opSlice, alias this) point into the malloc'ed
+// memory, and resize, ensure, release and the destructor free or move it.
+// The compiler doesn't check this, even in @safe code: a slice of it must
+// not be used after one of those, or after the array is gone.
 package struct MallocArray(T)
 {
 pure nothrow @nogc @safe:
