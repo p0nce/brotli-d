@@ -139,10 +139,14 @@ void freeArray(T)(ref T[] arr) @system
 }
 
 // A malloc'ed array, freed by its destructor. It can't be copied.
-// Not memory-safe: its slices (opSlice, alias this) point into the malloc'ed
-// memory, and resize, ensure, release and the destructor free or move it.
-// The compiler doesn't check this, even in @safe code: a slice of it must
-// not be used after one of those, or after the array is gone.
+// Its slices (opSlice, alias this) point into the malloc'ed memory, which
+// resize, ensure, release and the destructor free or move. The compiler
+// doesn't check that a slice isn't used after that, even in @safe code: the
+// code is @safe only because every call site was reviewed for it. When
+// calling one of them (or GrowableArray.push, or a function that does,
+// given the workspace), no slice taken before may be used after: not in a
+// local, a struct field (BlockCursor, TableGroup, a `buf`), or an argument
+// passed along with the array.
 package struct MallocArray(T)
 {
 pure nothrow @nogc @safe:
