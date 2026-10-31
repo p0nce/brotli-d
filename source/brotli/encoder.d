@@ -3371,6 +3371,8 @@ enum uint SPLIT_PADDING_COST = 1 << 26;
 // histogram, relative to the best path. Capped at the switch cost: then the
 // path switches from the best one, and switchSignal records it. Costs stay
 // below 2^31: signed comparisons are the unsigned ones.
+// Halts if a symbol has no row in insertCost, or blockIds or switchSignal is
+// too short, even in release builds.
 void findBestPaths(size_t N)(scope const(ushort)[] symbols, scope const(uint)[] insertCost,
                              size_t numVectors, uint switchCost, scope ubyte[] blockIds,
                              scope ubyte[] switchSignal, size_t bitmapLength) @trusted
@@ -3379,8 +3381,10 @@ void findBestPaths(size_t N)(scope const(ushort)[] symbols, scope const(uint)[] 
         enum size_t nv = N;
     else
         size_t nv = numVectors;
-    if (nv > 64 || (nv + 1) / 2 > bitmapLength)
+    if (nv == 0 || nv > 64 || (nv + 1) / 2 > bitmapLength
+        || blockIds.length < symbols.length || switchSignal.length / bitmapLength < symbols.length)
         assert(0);
+    size_t numRows = insertCost.length / (nv * 4);
     // With N > 0 the loops over vectors are unrolled, and the costs stay in
     // registers.
     __m128i[N > 0 ? N : 64] costs;
@@ -3388,6 +3392,8 @@ void findBestPaths(size_t N)(scope const(ushort)[] symbols, scope const(uint)[] 
         costs[v] = _mm_setzero_si128();
     foreach (i, sym; symbols)
     {
+        if (sym >= numRows)
+            assert(0);
         const(uint)[] row = insertCost[sym * nv * 4 .. (sym + 1) * nv * 4];
         const(__m128i)* ic = cast(const(__m128i)*) row.ptr;
         uint sc = switchCost;
