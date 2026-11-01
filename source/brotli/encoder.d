@@ -2533,7 +2533,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 // Binary tree match finder: a binary search tree of the window positions
 // with the same 4-byte hash, sorted by the data that follows them. Finds
 // every match length at a position, with the smallest distance found for it.
-@tuning enum TREE_BUCKET_BITS = 17;
+@tuning enum TREE_BUCKET_BITS = 18;
 // The trees cover at most that much history: 8 bytes of memory per byte.
 @tuning enum MAX_TREE_WINDOW = 1 << 22;
 @tuning enum MAX_TREE_SEARCH_DEPTH = 64;
