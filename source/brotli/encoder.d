@@ -1667,7 +1667,7 @@ struct LevelParams
     ubyte hashLength;       // bytes hashed by the hash table: 4, or 5 for text (see textHashLength)
 }
 
-@tuning static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
+static immutable LevelParams[BROTLI_MAX_LEVEL + 1] kLevelParams =
 [
     LevelParams(14, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false, 4), // 0
     LevelParams(15, 0,  4, false,  64, false, false, false, 0, 0, false, 0, 0, 0, false, false, 4), // 1
@@ -2541,8 +2541,10 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuning enum MAX_TREE_WINDOW = 1 << 22; // Can only be tuned if test suite is in level 10-11, with files > 4mb, with large window sizes
 @tuning enum MAX_TREE_SEARCH_DEPTH = 64;
 @tuning enum MAX_TREE_COMP_LENGTH = 128;
-@tuning enum SHORT_MATCH_SEARCH_DISTANCE = 64; // for matches of 2 and 3 bytes
-@tuning enum MISSING_SYMBOL_EXTRA_BITS = 16; // cost of an absent symbol x8, above the rarest
+
+@tuned enum SHORT_MATCH_SEARCH_DISTANCE = 128; // for matches of 2 and 3 bytes (was: 64)
+
+@tuned enum MISSING_SYMBOL_EXTRA_BITS = 16; // cost of an absent symbol x8, above the rarest
 @tuned enum INITIAL_COMMAND_COST_OFFSET = 10; // first pass: symbol i costs log2(this + i)
 @tuned enum INITIAL_DISTANCE_COST_OFFSET = 20;
 @tuning enum OPTIMAL_MATCH_STARTS = 2; // starts tried with all the matches, the others only with short codes
@@ -3440,7 +3442,7 @@ struct SplitParams
     bool clusterBlocks;         // cluster each block on its own, not the histograms (slower)
 }
 
-@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 1; // cost of a symbol absent from a histogram, above log2(total)
+@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 8; // cost of a symbol absent from a histogram x8, above log2(total)
 // Switches are cheaper at the beginning, where histograms are less reliable:
 // from START% of the switch cost, + SLOPE% each WARMUP symbols, until WARMUP.
 @tuning enum SPLIT_WARMUP = 2000;
@@ -3605,7 +3607,7 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
             total += c;
         uint log2Total = log2Fixed(cast(size_t) total);
         foreach (s, c; h)
-            insertCost[s * stride + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_ONE_BIT
+            insertCost[s * stride + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_EIGHT_BIT
                                                  : log2Total - log2Fixed(c);
     }
     foreach (s; 0 .. alphabetSize)
