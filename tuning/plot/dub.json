@@ -1,0 +1,10 @@
+{
+	"targetName": "plot",
+	"license": "MIT",
+	"name": "plot",
+	"sourcePaths": [
+		"source"
+	],
+	"description": "Runs test-encoder builds and plots their speed against the mean ratio, one point per level, as an SVG.",
+	"targetType": "executable"
+}
