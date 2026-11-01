@@ -2544,7 +2544,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuning enum SHORT_MATCH_SEARCH_DISTANCE = 64; // for matches of 2 and 3 bytes
 @tuning enum MISSING_SYMBOL_EXTRA_BITS = 16; // cost of an absent symbol x8, above the rarest
 @tuned enum INITIAL_COMMAND_COST_OFFSET = 10; // first pass: symbol i costs log2(this + i)
-@tuning enum INITIAL_DISTANCE_COST_OFFSET = 20;
+@tuned enum INITIAL_DISTANCE_COST_OFFSET = 20;
 @tuning enum OPTIMAL_MATCH_STARTS = 2; // starts tried with all the matches, the others only with short codes
 @tuning enum long START_MAX_COST_DIFF = 0; // command ends worse than literals don't start inserts
 @tuning enum LONG_COPY_QUICK_STEP = 16384; // skip the parse inside copies at least that long
