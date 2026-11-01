@@ -3,14 +3,20 @@
     plots their speed against their mean ratio, one point per level, in an
     SVG.
 
-    Usage: plot [--levels <min> <max>] [--iters <num>] [--out <file.svg>]
-                [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]
+    Usage: plot [--levels <min> <max>] [--iters <num>] [--category <list>]
+                [--out <file.svg>] [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]
 
-    Each encoder runs as `<encoder.exe> <min> <max> [--iters <num>]`, one at a
-    time (no parallel jobs: the machine heats), and its summary lines
-    "level N   median X%   mean Y%   Z MB/s" are read from its output.
+    Each encoder runs as `<encoder.exe> <min> <max> [--iters <num>]
+    [--category=<list>]`, one at a time (no parallel jobs: the machine
+    heats), and its summary lines "level N   median X%   mean Y%   Z MB/s" are read
+    from its output.
     Levels default to 1..11. The SVG goes to plot.svg next to this executable
     unless --out says otherwise. The numbers are printed as a table too.
+
+    --category (also -category=<list>): which inputs the encoders compress,
+    passed down as is: 100, 1k, 5k, large, all, comma-separated. Without it
+    they compress everything. Every encoder must know the option. Shown in
+    the SVG title.
 
     --assume-same-speed: in the SVG, every encoder gets the same speed at a
     level, the mean of their measured speeds, so that only the ratios differ
@@ -50,6 +56,7 @@ int main(string[] args)
 {
     int minLevel = 1, maxLevel = 11;
     string iters;
+    string category; // --category, passed to the encoders; empty: their default (all)
     bool sameSpeed;
     string outPath = buildPath(dirName(thisExePath), "plot.svg");
     string[] exes;
@@ -72,6 +79,16 @@ int main(string[] args)
                     return usage();
                 iters = args[i];
             }
+            else if (args[i] == "--category" || args[i] == "-category")
+            {
+                if (++i == args.length)
+                    return usage();
+                category = args[i];
+            }
+            else if (args[i].startsWith("--category="))
+                category = args[i]["--category=".length .. $];
+            else if (args[i].startsWith("-category="))
+                category = args[i]["-category=".length .. $];
             else if (args[i] == "--out")
             {
                 if (++i == args.length)
@@ -94,6 +111,8 @@ int main(string[] args)
         string[] cmd = [path, minLevel.to!string, maxLevel.to!string];
         if (iters.length)
             cmd ~= ["--iters", iters];
+        if (category.length)
+            cmd ~= "--category=" ~ category;
         stderr.writefln("running %s", cmd.join(" "));
         auto r = execute(cmd);
         if (r.status != 0)
@@ -113,7 +132,7 @@ int main(string[] args)
     printTable(series);
     if (sameSpeed)
         averageSpeeds(series);
-    std.file.write(outPath, svg(series));
+    std.file.write(outPath, svg(series, category));
     writefln("wrote %s", outPath);
     return 0;
 }
@@ -201,7 +220,7 @@ immutable string[] DARK = ["#3987e5", "#d95926", "#199e70", "#c98500",
 enum W = 900, H = 600;
 enum L = 80, R = 30, T = 70, B = 60; // margins
 
-string svg(Series[] series)
+string svg(Series[] series, string category)
 {
     double xmin = double.max, xmax = -double.max, ymin = double.max, ymax = -double.max;
     foreach (s; series)
@@ -234,8 +253,9 @@ string svg(Series[] series)
     o ~= "}\n</style>\n";
     o ~= format(`<rect class="bg" width="%d" height="%d"/>`, W, H) ~ "\n";
 
-    o ~= format(`<text class="ink" x="%d" y="28" font-size="18" font-weight="600">Speed vs mean ratio, levels %d to %d</text>`,
-                L, series[0].points[0].level, series[0].points[$ - 1].level) ~ "\n";
+    o ~= format(`<text class="ink" x="%d" y="28" font-size="18" font-weight="600">Speed vs mean ratio, levels %d to %d%s</text>`,
+                L, series[0].points[0].level, series[0].points[$ - 1].level,
+                category.length ? xmlEscape(", category " ~ category) : "") ~ "\n";
 
     // Legend, one row above the plot.
     double lx = L;
@@ -318,7 +338,7 @@ string xmlEscape(string s)
 
 int usage()
 {
-    stderr.writefln("Usage: plot [--levels <min> <max>] [--iters <num>] [--out <file.svg>]");
+    stderr.writefln("Usage: plot [--levels <min> <max>] [--iters <num>] [--category <list>] [--out <file.svg>]");
     stderr.writefln("            [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]");
     return 1;
 }

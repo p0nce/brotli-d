@@ -1,8 +1,12 @@
 /**
     Compress every file in inputs/ with the D encoder, at a range of levels.
 
-    Usage: test-encoder <level> [--iters <num>] [-v|--verbose]
-           test-encoder <min level> <max level> [--iters <num>] [-v|--verbose]
+    Usage: test-encoder <level> [--iters <num>] [--category <list>] [-v|--verbose]
+           test-encoder <min level> <max level> [--iters <num>] [--category <list>] [-v|--verbose]
+
+    --category (also -category=<list>): what to compress, comma-separated:
+    100, 1k, 5k (the small chunk groups below), large (the whole files), or
+    all (the default). E.g. --category=large or -category=100,1k.
 
     inputs/ is the directory next to the executable. Prints one line per
     level: the median and mean of its compression ratios (compressed /
@@ -24,6 +28,7 @@
 module app;
 
 import std.algorithm;
+import std.array;
 import std.conv;
 import std.datetime.stopwatch;
 import std.file;
@@ -36,16 +41,52 @@ import consolecolors;
 
 struct ChunkGroup
 {
+    string category; // its name for --category
     string name;
     size_t size;  // bytes per chunk
     size_t count; // chunks in all
 }
 
 immutable ChunkGroup[] CHUNK_GROUPS = [
-    ChunkGroup("small-100", 100, 64),
-    ChunkGroup("small-1k", 1024, 32),
-    ChunkGroup("small-5k", 5120, 16),
+    ChunkGroup("100", "small-100", 100, 64),
+    ChunkGroup("1k", "small-1k", 1024, 32),
+    ChunkGroup("5k", "small-5k", 5120, 16),
 ];
+
+// --category: "large" is the whole files, the others are CHUNK_GROUPS.
+enum string LARGE_CATEGORY = "large";
+
+// Which categories to run, from a comma-separated list; "all" is every one.
+// False if a name is unknown.
+bool parseCategories(string list, ref bool large, ref bool[CHUNK_GROUPS.length] groups)
+{
+    foreach (name; list.split(","))
+    {
+        if (name == "all")
+        {
+            large = true;
+            groups[] = true;
+            continue;
+        }
+        if (name == LARGE_CATEGORY)
+        {
+            large = true;
+            continue;
+        }
+        bool found = false;
+        foreach (g, group; CHUNK_GROUPS)
+        {
+            if (group.category == name)
+            {
+                groups[g] = true;
+                found = true;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
 
 struct Input
 {
@@ -59,6 +100,9 @@ int main(string[] args)
 
     int minLevel, maxLevel;
     int iters = 1;
+    bool runLarge = false;
+    bool[CHUNK_GROUPS.length] runGroups;
+    string categories = "all";
     try
     {
         string[] levels;
@@ -72,8 +116,23 @@ int main(string[] args)
                     return usage();
                 iters = args[i].to!int;
             }
+            else if (args[i] == "--category" || args[i] == "-category")
+            {
+                if (++i == args.length)
+                    return usage();
+                categories = args[i];
+            }
+            else if (args[i].startsWith("--category="))
+                categories = args[i]["--category=".length .. $];
+            else if (args[i].startsWith("-category="))
+                categories = args[i]["-category=".length .. $];
             else
                 levels ~= args[i];
+        }
+        if (!parseCategories(categories, runLarge, runGroups))
+        {
+            stderr.writefln("test-encoder: unknown category in \"%s\"", categories);
+            return usage();
         }
         if (levels.length == 1)
             minLevel = maxLevel = levels[0].to!int;
@@ -140,7 +199,7 @@ int main(string[] args)
 
         Totals totals;
 
-        foreach (input; inputs)
+        foreach (input; runLarge ? inputs : null)
         {
             size_t after;
             long ns;
@@ -154,7 +213,7 @@ int main(string[] args)
         foreach (g, group; CHUNK_GROUPS)
         {
             Input[] chunks = groupChunks[g];
-            if (chunks.length == 0)
+            if (!runGroups[g] || chunks.length == 0)
                 continue;
 
             size_t before, after;
@@ -207,6 +266,11 @@ struct Totals
         double[] s = ratios.dup;
         s.sort();
         size_t n = s.length;
+        if (n == 0)
+        {
+            say(format("level %2d   no input in the chosen categories", level));
+            return;
+        }
         double median = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
         string minMax = verbose ? format("min %s   max %s   ", yellow(format("%6.2f%%", s[0])),
                                          yellow(format("%6.2f%%", s[$ - 1])))
@@ -329,8 +393,9 @@ void say(string line)
 
 int usage()
 {
-    stderr.writefln("Usage: test-encoder <level> [--iters <num>] [-v|--verbose]");
-    stderr.writefln("       test-encoder <min level> <max level> [--iters <num>] [-v|--verbose]");
+    stderr.writefln("Usage: test-encoder <level> [--iters <num>] [--category <list>] [-v|--verbose]");
+    stderr.writefln("       test-encoder <min level> <max level> [--iters <num>] [--category <list>] [-v|--verbose]");
+    stderr.writefln("Categories, comma-separated: 100, 1k, 5k, large, all (default).");
     return 1;
 }
 

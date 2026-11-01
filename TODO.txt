@@ -9,21 +9,6 @@ Rules
 
 Compression leftovers (small gains)
 --------------------------------------
-[ ] Small inputs vs the reference (100 chunks of 100 B / 1 KB / 5 KB of
-    text and C, ours / reference, since SIMPLE_CODE_EXTRA_BITS): smaller
-    everywhere (0.896-0.994) except C 100 B at q9 (1.027) and C 1 KB at q11
-    (1.001). Before it: 100 B 1.00-1.13 at every level.
-[ ] 16-bit PCM audio (more-test-files/vive-la-lune.wav, 437 KB): level 11
-    is larger than the reference's (85.1% vs 84.7% of the input), the
-    only new input where it loses; level 5 is much smaller (85.6% vs
-    92.4%). Look at what q11 does with interleaved 16-bit samples
-    (literal context mode, distance parameters, block splits).
-[ ] pnggrad16rgb.png (4 KB): level 5 is 0.5% larger than the reference's.
-[ ] Level 9 on 100 B inputs is 3.7% (text) to 4.9% (C) larger than level
-    8 (0.997 vs 0.960, 1.027 vs 0.979 of the reference); 1 KB and 5 KB
-    don't show it. q9 differs from q8 by tryAllContextModes,
-    distanceParamSearch 2 and randomWindow 512: find which one, and why it
-    costs on tiny inputs.
 [ ] Dictionary transforms (prefixes, suffixes, uppercase) for levels 5-9.
 [ ] Segmentation from better statistics than order-0 bytes (e.g. the
     literals and commands of a fast parse), or measured choices at level
