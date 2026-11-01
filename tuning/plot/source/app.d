@@ -265,7 +265,7 @@ string svg(Series[] series)
             double x = px(p.mean), y = py(p.speed);
             o ~= format(`<g><title>%s, level %d: mean %.3f%%, %.2f MB/s</title>`, xmlEscape(s.name), p.level, p.mean, p.speed);
             o ~= format(`<circle cx="%.1f" cy="%.1f" r="12" fill="transparent"/>`, x, y);
-            o ~= format(`<circle class="s%d ring" cx="%.1f" cy="%.1f" r="5" stroke-width="2"/>`,
+            o ~= format(`<circle class="s%d ring" cx="%.1f" cy="%.1f" r="5" stroke-width="2" opacity="0.5"/>`,
                         c, x, y);
             o ~= format(`<text class="ink2" x="%.1f" y="%.1f" font-size="11" text-anchor="%s">%d</text></g>`,
                         right ? x + 9 : x - 9, y - 6, right ? "start" : "end", p.level) ~ "\n";
