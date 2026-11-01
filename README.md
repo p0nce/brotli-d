@@ -1,16 +1,13 @@
 # brotli
 
-Tiny, self-contained [Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder for D.
+Self-contained [Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder/encoder in the D programming language.
 
-- `source/brotli/decoder.d` (the 122 KB static dictionary is embedded), `source/brotli/encoder.d`
-  (work in progress, see `TODO.txt`); `import brotli;` imports both.
-- `@safe pure nothrow @nogc`. Only dependency is [numem](https://github.com/Inochi2D/numem),
-  for its pure `nu_malloc`/`nu_realloc`/`nu_free` (libc by default). Works with `-betterC`.
+- **WARNING** Very much vibe-coded code (Opus 5.5).
+- `@safe pure nothrow @nogc`, D source.
 - One-shot decoding, memory to memory.
-- Translation of Google's reference decoder (MIT), simplified to a non-streaming decoder.
-- Differentially tested against the reference C decoder: official test vectors,
-  every quality/window/mode of the reference encoder, and hundreds of thousands of
-  mutated streams (identical output, identical accept/reject decision).
+- Translation of Google's reference decoder (MIT), but non-streaming decoder.
+- 
+
 
 ## Usage
 
@@ -33,15 +30,18 @@ if (brotliDecompressAlloc(compressed, decoded, 100_000_000) == BrotliStatus.succ
 }
 ```
 
-`BrotliStatus` is one of `success`, `corrupted` (invalid, truncated, or followed
-by trailing bytes), `outputTooSmall`, `outOfMemory`.
+`BrotliStatus` is either:
+- `BrotliStatus.success`, 
+- `BrotliStatus.corrupted` (invalid, truncated, or followed
+by trailing bytes), 
+- `BrotliStatus.outputTooSmall` (give larger buffer), 
+- `BrotliStatus.outOfMemory`.
 
 ## Limitations
 
 - No streaming API: the whole input must be in memory, and the whole output too.
 - Large-window Brotli (non-RFC extension) and shared dictionaries are not supported.
-- Speed is about the same as the reference C decoder with LDC (~200-340 MB/s on text
-  and source code), slightly faster with `-boundscheck=off`. DMD is ~35% slower.
+
 
 ## Testing
 
