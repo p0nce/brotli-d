@@ -1435,7 +1435,7 @@ ubyte[10] findOmitFirstTransforms()
     return r;
 }
 
-@tuning enum OMIT_FIRST_MIN_LENGTH = 5; // shortest "omit first n" output tried
+@tuning enum OMIT_FIRST_MIN_LENGTH = 5; // shortest "omit first n" output tried (tuning: no effect measured)
 const(ubyte)[] omitFirstOutput(uint entry)
 {
     size_t n = entry >> 16;
