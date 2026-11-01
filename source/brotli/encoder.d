@@ -2194,10 +2194,10 @@ ulong bitsEntropy(scope const(uint)[] h)
 // Fewer prefix codes pay on tiny inputs; above 16, 5 KB+ inputs lose.
 @tuned enum int CODE_BITS_EXTRA = 1;
 @tuned enum ulong SIMPLE_CODE_EXTRA_BITS = 20 + CODE_BITS_EXTRA; // 20 = optimal, it turns out to be the same as COMPLEX_CODE_BITS mmmm
-enum ulong ONE_SYMBOL_CODE_BITS = 12 + SIMPLE_CODE_EXTRA_BITS;
-enum ulong TWO_SYMBOLS_CODE_BITS = 20 + SIMPLE_CODE_EXTRA_BITS;
-enum ulong THREE_SYMBOLS_CODE_BITS = 28 + SIMPLE_CODE_EXTRA_BITS;
-enum ulong FOUR_SYMBOLS_CODE_BITS = 37 + SIMPLE_CODE_EXTRA_BITS;
+@tuned enum ulong ONE_SYMBOL_CODE_BITS = 12 + SIMPLE_CODE_EXTRA_BITS; // not fruitful
+@tuned enum ulong TWO_SYMBOLS_CODE_BITS = 20 + SIMPLE_CODE_EXTRA_BITS; // not fruitful
+@tuned enum ulong THREE_SYMBOLS_CODE_BITS = 28 + SIMPLE_CODE_EXTRA_BITS; // probably optimal
+@tuned enum ulong FOUR_SYMBOLS_CODE_BITS = 37 + SIMPLE_CODE_EXTRA_BITS; // probably optimal
 @tuned enum ulong COMPLEX_CODE_BITS = 20 + CODE_BITS_EXTRA;
 @tuned enum ulong COMPLEX_CODE_BITS_PER_DEPTH = 3; // per bit of the longest code (strangely 2 wins quite a bit towards level 5, not sure why, but lost on level <= 9)
 
