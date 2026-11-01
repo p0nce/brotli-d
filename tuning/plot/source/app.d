@@ -280,7 +280,7 @@ string svg(Series[] series)
     {
         size_t c = i % LIGHT.length;
         string pts = s.points.map!(p => format("%.1f,%.1f", px(p.mean), py(p.speed))).join(" ");
-        o ~= format(`<polyline class="s%d" fill="none" stroke-width="2" stroke-linejoin="round" points="%s" style="fill:none"/>`, c, pts) ~ "\n";
+        o ~= format(`<polyline class="s%d" fill="none" stroke-width="1" stroke-linejoin="round" opacity="0.8" points="%s" style="fill:none"/>`, c, pts) ~ "\n";
     }
     foreach (i, s; series)
     {

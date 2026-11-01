@@ -2189,7 +2189,7 @@ ulong bitsEntropy(scope const(uint)[] h)
 // complex codes (plus the entropy of their code lengths). The simple codes
 // are their exact sizes for 8-bit symbols, plus SIMPLE_CODE_EXTRA_BITS.
 // Fewer prefix codes pay on tiny inputs; above 16, 5 KB+ inputs lose.
-@tuning enum ulong SIMPLE_CODE_EXTRA_BITS = 16;
+@tuning enum ulong SIMPLE_CODE_EXTRA_BITS = 20; // 20 = optimal, it turns out to be the same as COMPLEX_CODE_BITS mmmm
 enum ulong ONE_SYMBOL_CODE_BITS = 12 + SIMPLE_CODE_EXTRA_BITS;
 enum ulong TWO_SYMBOLS_CODE_BITS = 20 + SIMPLE_CODE_EXTRA_BITS;
 enum ulong THREE_SYMBOLS_CODE_BITS = 28 + SIMPLE_CODE_EXTRA_BITS;
