@@ -7,9 +7,13 @@ Uses the decoder's tables and static dictionary, and numem for allocations.
 Everything is `@safe pure nothrow @nogc`. Cost estimates use integer
 arithmetic only: the output is the same on every platform.
 
-Authored by Claude Opus 5.5.
+Not a line-by-line translation, but the algorithms follow Google's reference
+encoder (c/enc, MIT): the Zopfli-style optimal parser and its cost model,
+the match scores, the prefix code cost model, the RLE heuristic for Huffman
+counts, histogram clustering and block splitting. Authored by Claude Opus 5.5.
 
 Copyright:
+    Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
     Copyright (c) 2026 Guillaume Piolat.
 
 License:
@@ -43,7 +47,8 @@ import brotli.decoder;
 
 @safe pure nothrow @nogc:
 
-/// Compression levels: 0 is the fastest, 11 compresses the most.
+/// Compression levels: 0 is the fastest, 10-11 compresses the most but
+/// super slow.
 enum BROTLI_MIN_LEVEL = 0;
 enum BROTLI_MAX_LEVEL = 11;     /// ditto
 enum BROTLI_DEFAULT_LEVEL = 6;  /// ditto
@@ -7409,6 +7414,7 @@ static immutable ushort[NUM_DICTIONARY_WORDS] kDictionaryWords =
 ];
 
 /*
+Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 Copyright (c) 2026 Guillaume Piolat.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
