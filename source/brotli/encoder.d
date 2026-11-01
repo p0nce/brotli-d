@@ -2046,6 +2046,9 @@ bool createCommands(uint hashLength, bool isTagged)(ref Hasher h, scope const(ub
 // Costs are in 1/65536 of a bit (16.16 fixed point): integer arithmetic,
 // the same on every platform.
 enum uint COST_ONE_BIT = 1 << 16;
+enum uint COST_HALF_BIT = 1 << 15;
+enum uint COST_QUARTER_BIT = 1 << 14;
+enum uint COST_EIGHT_BIT = 1 << 13;
 
 // log2(x) in fixed point with `fractionalBits` bits, truncated: by
 // repeated squaring of the mantissa. Slow, for checking the tables below.
@@ -2539,8 +2542,8 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuning enum MAX_TREE_SEARCH_DEPTH = 64;
 @tuning enum MAX_TREE_COMP_LENGTH = 128;
 @tuning enum SHORT_MATCH_SEARCH_DISTANCE = 64; // for matches of 2 and 3 bytes
-@tuning enum MISSING_SYMBOL_EXTRA_BITS = 2; // cost of an absent symbol, above the rarest
-@tuning enum INITIAL_COMMAND_COST_OFFSET = 11; // first pass: symbol i costs log2(this + i)
+@tuning enum MISSING_SYMBOL_EXTRA_BITS = 16; // cost of an absent symbol x8, above the rarest
+@tuning enum INITIAL_COMMAND_COST_OFFSET = 10; //11 // first pass: symbol i costs log2(this + i)
 @tuning enum INITIAL_DISTANCE_COST_OFFSET = 20;
 @tuning enum OPTIMAL_MATCH_STARTS = 2; // starts tried with all the matches, the others only with short codes
 @tuning enum long START_MAX_COST_DIFF = 0; // command ends worse than literals don't start inserts
@@ -2769,7 +2772,7 @@ void setCosts(scope const(uint)[] histogram, scope uint[] cost, bool literals)
             missing++;
     }
     uint log2Sum = log2Fixed(sum);
-    uint missingCost = log2Fixed(literals ? sum : sum + missing) + MISSING_SYMBOL_EXTRA_BITS * COST_ONE_BIT;
+    uint missingCost = log2Fixed(literals ? sum : sum + missing) + MISSING_SYMBOL_EXTRA_BITS * COST_EIGHT_BIT;
     foreach (i, c; histogram)
     {
         if (c == 0)
