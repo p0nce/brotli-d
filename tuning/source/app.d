@@ -1,23 +1,25 @@
 /**
     Compress every file in inputs/ with the D encoder, at a range of levels.
 
-    Usage: test-encoder <level> [--iters <num>]
-           test-encoder <min level> <max level> [--iters <num>]
+    Usage: test-encoder <level> [--iters <num>] [-v|--verbose]
+           test-encoder <min level> <max level> [--iters <num>] [-v|--verbose]
 
-    inputs/ is the directory next to the executable. For each level and file,
-    prints the compression ratio (compressed / original), the bytes before and
-    after, and the speed in MB/s (10^6 bytes per second, of input), the best of
-    --iters runs (default 1). Every output is decoded again and compared to its
+    inputs/ is the directory next to the executable. Prints one line per
+    level: the median and mean of its compression ratios (compressed /
+    original), and the speed in MB/s (10^6 bytes per second, of input) over
+    all its inputs. Times are the best of --iters runs (default 1).
+
+    With -v, also prints the min and max ratios, and for each file: its ratio,
+    the bytes before and after, and its speed. Every output is decoded again
+    and compared to its
     input (not timed), then written to outputs/<file>.br (outputs/ is created
     next to the executable). With several levels, each level overwrites the
     previous one: the file holds the last level.
 
     Small inputs (CHUNK_GROUPS): 64 chunks of 100 B, 32 of 1 KB and 16 of
     5 KB are cut from the inputs, spread over the files, and compressed one by
-    one; outputs in outputs/<group>/. Each group is one line, with the bytes
-    and the best times summed over its chunks, and one ratio.
-
-    After each level, prints the min, max, median and mean of its ratios.
+    one; outputs in outputs/<group>/. Each group counts as one input, with the
+    bytes and the best times summed over its chunks, and one ratio.
 */
 module app;
 
@@ -62,7 +64,9 @@ int main(string[] args)
         string[] levels;
         for (size_t i = 1; i < args.length; i++)
         {
-            if (args[i] == "--iters")
+            if (args[i] == "-v" || args[i] == "--verbose")
+                verbose = true;
+            else if (args[i] == "--iters")
             {
                 if (++i == args.length)
                     return usage();
@@ -127,11 +131,14 @@ int main(string[] args)
 
     foreach (level; minLevel .. maxLevel + 1)
     {
-        if (level > minLevel)
-            writefln("");
-        writefln("%-32s %5s %8s %12s %12s %10s", "file", "level", "ratio", "before", "after", "MB/s");
+        if (verbose)
+        {
+            if (level > minLevel)
+                writefln("");
+            writefln("%-32s %5s %8s %12s %12s %10s", "file", "level", "ratio", "before", "after", "MB/s");
+        }
 
-        double[] ratios;
+        Totals totals;
 
         foreach (input; inputs)
         {
@@ -141,7 +148,7 @@ int main(string[] args)
             if (!encode(input.data, level, iters, input.name, after, ns, output))
                 return 1;
             std.file.write(buildPath(outDir, input.name ~ ".br"), output);
-            ratios ~= report(input.name, level, input.data.length, after, ns);
+            totals.add(input.name, level, input.data.length, after, ns);
         }
 
         foreach (g, group; CHUNK_GROUPS)
@@ -165,28 +172,54 @@ int main(string[] args)
                 after += chunkAfter;
                 ns += chunkNs;
             }
-            ratios ~= report(format("%s (%d chunks)", group.name, chunks.length),
-                             level, before, after, ns);
+            totals.add(format("%s (%d chunks)", group.name, chunks.length),
+                       level, before, after, ns);
         }
 
-        summary(level, ratios);
+        if (verbose)
+            writefln("");
+        totals.summary(level);
     }
     return 0;
 }
 
-// The min, max, median and mean of one level's ratios.
-void summary(int level, double[] ratios)
+bool verbose; // -v: a line per input too
+
+// The inputs of one level: their ratios, and bytes and time for the speed.
+struct Totals
 {
-    double[] s = ratios.dup;
-    s.sort();
-    size_t n = s.length;
-    double median = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
-    writefln("");
-    writefln("level %d: %d ratios (compressed / original)", level, n);
-    say("  min    " ~ yellow(format("%7.2f%%", s[0])));
-    say("  max    " ~ yellow(format("%7.2f%%", s[$ - 1])));
-    say("  median " ~ yellow(format("%7.2f%%", median)));
-    say("  mean   " ~ yellow(format("%7.2f%%", sum(s) / n)));
+    double[] ratios;
+    size_t before;
+    long ns;
+
+    // One input; printed with -v.
+    void add(string name, int level, size_t inBytes, size_t outBytes, long inNs)
+    {
+        ratios ~= report(name, level, inBytes, outBytes, inNs);
+        before += inBytes;
+        ns += inNs;
+    }
+
+    // The median and mean of the ratios (with -v, min and max too), and the
+    // speed, on one line.
+    void summary(int level)
+    {
+        double[] s = ratios.dup;
+        s.sort();
+        size_t n = s.length;
+        double median = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+        string minMax = verbose ? format("min %s   max %s   ", yellow(format("%6.2f%%", s[0])),
+                                         yellow(format("%6.2f%%", s[$ - 1])))
+                                : "";
+        say(format("level %2d   %smedian %s   mean %s   %s MB/s", level, minMax,
+                   yellow(format("%6.2f%%", median)), yellow(format("%6.2f%%", sum(s) / n)),
+                   lcyan(format("%8.2f", mbPerSecond(before, ns)))));
+    }
+}
+
+double mbPerSecond(size_t bytes, long ns)
+{
+    return ns > 0 ? bytes * 1e3 / ns : 0.0; // bytes per ns * 1000 = MB/s
 }
 
 // group.count chunks of group.size bytes, dealt to the inputs in turn (files
@@ -253,15 +286,15 @@ bool encode(const(ubyte)[] input, int level, int iters, string what,
     return true;
 }
 
-// Prints one line and returns its ratio.
+// Returns the ratio of one input; prints its line with -v.
 double report(string name, int level, size_t before, size_t after, long ns)
 {
     double ratio = before ? 100.0 * after / before : 0.0;
-    double mbs = ns > 0 ? before * 1e3 / ns : 0.0; // bytes per ns * 1000 = MB/s
     // Padded before escaping, so that "&amp;" counts as one column.
-    say(format("%s %5d %s %12d %12d %s", escaped(format("%-32s", name)),
-               level, yellow(format("%7.2f%%", ratio)), before, after,
-               lcyan(format("%10.2f", mbs))));
+    if (verbose)
+        say(format("%s %5d %s %12d %12d %s", escaped(format("%-32s", name)),
+                   level, yellow(format("%7.2f%%", ratio)), before, after,
+                   lcyan(format("%10.2f", mbPerSecond(before, ns)))));
     return ratio;
 }
 
@@ -296,8 +329,8 @@ void say(string line)
 
 int usage()
 {
-    stderr.writefln("Usage: test-encoder <level> [--iters <num>]");
-    stderr.writefln("       test-encoder <min level> <max level> [--iters <num>]");
+    stderr.writefln("Usage: test-encoder <level> [--iters <num>] [-v|--verbose]");
+    stderr.writefln("       test-encoder <min level> <max level> [--iters <num>] [-v|--verbose]");
     return 1;
 }
 
