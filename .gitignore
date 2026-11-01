@@ -12,3 +12,4 @@ docs.json
 dub.selections.json
 *.exp
 __pycache__/
+tuning/outputs/
