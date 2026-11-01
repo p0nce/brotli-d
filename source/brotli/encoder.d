@@ -77,7 +77,110 @@ size_t brotliCompressBound(size_t inputLength)
 }
 
 /**
-    Compress `input` into a caller-provided buffer.
+    Encoder state that is kept from one call to the next: hash tables, match
+    finder, histograms, block splits and their scratch buffers. Reusing one
+    `BrotliEncoder` for many inputs saves allocating them again; the output is
+    the same as with a new encoder. It holds its memory until destroyed or
+    `release`d, sized for the largest input and level it has compressed.
+
+    It can't be copied: pass it by `ref`. One encoder must not be used by two
+    threads at the same time.
+
+    Example:
+    ---
+    BrotliEncoder enc;
+    foreach (data; manySmallInputs)
+    {
+        size_t len;
+        if (brotliCompress(enc, data, buf, len, 5) == BrotliStatus.success)
+            use(buf[0 .. len]);
+    }
+    ---
+*/
+struct BrotliEncoder
+{
+pure nothrow @nogc @safe:
+    @disable this(this);
+
+    ~this()
+    {
+        release();
+    }
+
+    /// Frees the memory now. The encoder can still be used afterwards.
+    void release()
+    {
+        st.release();
+    }
+
+private:
+    EncoderState st;
+}
+
+/**
+    Compress `input` into a caller-provided buffer, reusing `encoder`'s memory.
+
+    Params:
+        encoder     = State to reuse (see `BrotliEncoder`).
+        input       = Data to compress.
+        output      = Where to write the compressed stream. Its content is
+                      unspecified on error.
+        encodedSize = On success, number of bytes written to `output`. 0 on error.
+        level       = Compression level, clamped to [BROTLI_MIN_LEVEL, BROTLI_MAX_LEVEL].
+        windowBits  = Maximum window size, clamped to
+                      [BROTLI_MIN_WINDOW_BITS, BROTLI_MAX_WINDOW_BITS].
+
+    Returns: `BrotliStatus.success`, `outputTooSmall` (cannot happen with an
+             output of `brotliCompressBound(input.length)` bytes) or `outOfMemory`.
+*/
+BrotliStatus brotliCompress(ref BrotliEncoder encoder, const(ubyte)[] input, ubyte[] output,
+                            out size_t encodedSize,
+                            int level = BROTLI_DEFAULT_LEVEL,
+                            int windowBits = BROTLI_DEFAULT_WINDOW_BITS)
+{
+    BitWriter w;
+    w.buf = output;
+    w.growable = false;
+    BrotliStatus r = encodeStream(encoder.st, input, w, level, windowBits);
+    if (r == BrotliStatus.success)
+        encodedSize = w.pos;
+    return r;
+}
+
+/**
+    Compress `input` into a newly allocated buffer, reusing `encoder`'s memory.
+
+    Params:
+        encoder    = State to reuse (see `BrotliEncoder`).
+        input      = Data to compress.
+        output     = On success, the compressed stream, to be released with
+                     `brotliFree`. `null` on error.
+        level      = Compression level, clamped to [BROTLI_MIN_LEVEL, BROTLI_MAX_LEVEL].
+        windowBits = Maximum window size, clamped to
+                     [BROTLI_MIN_WINDOW_BITS, BROTLI_MAX_WINDOW_BITS].
+
+    Returns: `BrotliStatus.success` or `BrotliStatus.outOfMemory`.
+*/
+BrotliStatus brotliCompressAlloc(ref BrotliEncoder encoder, const(ubyte)[] input,
+                                 out ubyte[] output,
+                                 int level = BROTLI_DEFAULT_LEVEL,
+                                 int windowBits = BROTLI_DEFAULT_WINDOW_BITS)
+{
+    BitWriter w;
+    w.growable = true;
+    BrotliStatus r = encodeStream(encoder.st, input, w, level, windowBits);
+    if (r != BrotliStatus.success)
+        return r;
+    assert(w.pos > 0);
+    // Shrunk to fit by take(). If that fails, the larger buffer is still fine.
+    w.owned.resize(w.pos);
+    output = w.owned.take()[0 .. w.pos];
+    return r;
+}
+
+/**
+    Compress `input` into a caller-provided buffer, with a new encoder. Same
+    as the overload above with a `BrotliEncoder` used once.
 
     Params:
         input       = Data to compress.
@@ -95,17 +198,13 @@ BrotliStatus brotliCompress(const(ubyte)[] input, ubyte[] output, out size_t enc
                             int level = BROTLI_DEFAULT_LEVEL,
                             int windowBits = BROTLI_DEFAULT_WINDOW_BITS)
 {
-    BitWriter w;
-    w.buf = output;
-    w.growable = false;
-    BrotliStatus r = encodeStream(input, w, level, windowBits);
-    if (r == BrotliStatus.success)
-        encodedSize = w.pos;
-    return r;
+    BrotliEncoder encoder;
+    return brotliCompress(encoder, input, output, encodedSize, level, windowBits);
 }
 
 /**
-    Compress `input` into a newly allocated buffer.
+    Compress `input` into a newly allocated buffer, with a new encoder. Same
+    as the overload above with a `BrotliEncoder` used once.
 
     Params:
         input      = Data to compress.
@@ -121,16 +220,8 @@ BrotliStatus brotliCompressAlloc(const(ubyte)[] input, out ubyte[] output,
                                  int level = BROTLI_DEFAULT_LEVEL,
                                  int windowBits = BROTLI_DEFAULT_WINDOW_BITS)
 {
-    BitWriter w;
-    w.growable = true;
-    BrotliStatus r = encodeStream(input, w, level, windowBits);
-    if (r != BrotliStatus.success)
-        return r;
-    assert(w.pos > 0);
-    // Shrink to fit. If that fails, the larger buffer is still fine.
-    w.owned.resize(w.pos);
-    output = w.owned.take()[0 .. w.pos];
-    return r;
+    BrotliEncoder encoder;
+    return brotliCompressAlloc(encoder, input, output, level, windowBits);
 }
 
 private:
@@ -4725,7 +4816,82 @@ bool chooseMetaBlocks(scope const(ubyte)[] input, ref MallocArray!size_t ends, o
     return true;
 }
 
-BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int windowBits)
+// The state of a BrotliEncoder: buffers that outlive a call, so that the next
+// one doesn't allocate them again. resetKeepingMemory gives each call the
+// state of a new encoder, except for the memory.
+struct EncoderState
+{
+pure nothrow @nogc @safe:
+    Hasher hasher;
+    TreeHasher tree;
+    EncoderWorkspace ws;
+    MallocArray!size_t ends;
+
+    @disable this(this);
+
+    void release()
+    {
+        hasher.release();
+        tree.release();
+        ws.release();
+        ends.release();
+    }
+}
+
+// True if S has a MallocArray, in its fields or theirs.
+template hasMallocArray(S)
+{
+    static if (is(S == MallocArray!E, E))
+        enum hasMallocArray = true;
+    else static if (is(S == E[n], E, size_t n))
+        enum hasMallocArray = hasMallocArray!E;
+    else static if (is(S == struct))
+    {
+        enum hasMallocArray = () {
+            bool r = false;
+            static foreach (F; typeof(S.tupleof))
+                r = r || hasMallocArray!F;
+            return r;
+        }();
+    }
+    else
+        enum hasMallocArray = false;
+}
+
+// Gives `s` its .init value, except that its MallocArrays (in its fields or
+// theirs) keep their memory, with length 0.
+void resetKeepingMemory(S)(ref S s)
+{
+    static if (is(S == MallocArray!E, E))
+        s.clear();
+    else static if (is(S == E[n], E, size_t n))
+    {
+        foreach (ref e; s)
+            resetKeepingMemory(e);
+    }
+    else
+    {
+        static assert(is(S == struct));
+        static foreach (i, F; typeof(S.tupleof))
+        {
+            static if (hasMallocArray!F)
+                resetKeepingMemory(s.tupleof[i]);
+            else
+                s.tupleof[i] = S.init.tupleof[i];
+        }
+    }
+}
+
+BrotliStatus encodeStream(ref EncoderState st, const(ubyte)[] input, ref BitWriter w,
+                          int level, int windowBits)
+{
+    resetKeepingMemory(st);
+    return encodeStream(input, w, level, windowBits, st.hasher, st.tree, st.ws, st.ends);
+}
+
+BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int windowBits,
+                          ref Hasher h, ref TreeHasher t, ref EncoderWorkspace ws,
+                          ref MallocArray!size_t ends)
 {
     if (level < BROTLI_MIN_LEVEL)
         level = BROTLI_MIN_LEVEL;
@@ -4754,10 +4920,6 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
     // Match finder: hash table for greedy parsing, binary trees for
     // optimal parsing. No larger than useful.
     bool optimal = params.optimalPasses > 0;
-    Hasher h;
-    scope(exit) h.release();
-    TreeHasher t;
-    scope(exit) t.release();
     if (optimal)
     {
         size_t windowSize = 16;
@@ -4782,12 +4944,9 @@ BrotliStatus encodeStream(const(ubyte)[] input, ref BitWriter w, int level, int 
             return BrotliStatus.outOfMemory;
     }
 
-    EncoderWorkspace ws;
-    scope(exit) ws.release();
     if (!ws.initialize())
         return BrotliStatus.outOfMemory;
 
-    MallocArray!size_t ends;
     size_t numBlocks = 0;
     if (optimal && !chooseMetaBlocks(input, ends, numBlocks))
         return BrotliStatus.outOfMemory;
@@ -5528,6 +5687,43 @@ unittest
     // One meta-block for short inputs.
     assert(chooseMetaBlocks(input[0 .. 100], ends, numBlocks));
     assert(numBlocks == 1 && ends[0] == 100);
+}
+
+unittest
+{
+    // A reused BrotliEncoder gives the same bytes as a new one: levels going
+    // up then down, inputs of several sizes and kinds, after release too.
+    MallocArray!ubyte input;
+    assert(input.resize(200_000));
+    TestRandom rng;
+    foreach (i; 0 .. 100_000)
+        input[i] = cast(ubyte)('a' + rng.below(6) + (rng.below(9) == 0 ? 32 : 0));
+    foreach (i; 100_000 .. 200_000)
+        input[i] = cast(ubyte)(rng.below(3) ? input[i - 1 - rng.below(64)] : rng.next());
+    static immutable size_t[3][4] slices = [[0, 100, 0], [100_000, 101_000, 0],
+                                            [0, 200_000, 0], [150_000, 155_120, 0]];
+
+    MallocArray!ubyte reused, fresh;
+    assert(reused.resize(brotliCompressBound(200_000)) && fresh.resize(reused.length));
+    BrotliEncoder enc;
+    foreach (pass; 0 .. 2)
+    {
+        foreach (step; 0 .. 2 * (BROTLI_MAX_LEVEL + 1))
+        {
+            int level = step <= BROTLI_MAX_LEVEL ? step : 2 * BROTLI_MAX_LEVEL + 1 - step;
+            foreach (ref s; slices)
+            {
+                if (level >= 10 && s[1] - s[0] > 10_000)
+                    continue; // slow
+                size_t a, b;
+                BrotliEncoder once;
+                assert(brotliCompress(enc, input[s[0] .. s[1]], reused[], a, level) == BrotliStatus.success);
+                assert(brotliCompress(once, input[s[0] .. s[1]], fresh[], b, level) == BrotliStatus.success);
+                assert(reused[0 .. a] == fresh[0 .. b]);
+            }
+        }
+        enc.release();
+    }
 }
 
 

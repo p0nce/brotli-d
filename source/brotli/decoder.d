@@ -150,7 +150,11 @@ void freeArray(T)(ref T[] arr) @system
 package struct MallocArray(T)
 {
 pure nothrow @nogc @safe:
-    private T[] data;
+    // The memory is `mem`, its first `len` elements are the array. Shrinking
+    // keeps the memory, so that a reused array (BrotliEncoder) doesn't call
+    // realloc again.
+    private T[] mem;
+    private size_t len;
 
     @disable this(this);
 
@@ -162,71 +166,93 @@ pure nothrow @nogc @safe:
     // The elements, until the next resize or release.
     inout(T)[] opSlice() inout return
     {
-        return data;
+        return mem[0 .. len];
     }
 
     alias opSlice this;
 
     inout(T)[] opSlice(size_t a, size_t b) inout return
     {
-        return data[a .. b];
+        return mem[0 .. len][a .. b];
     }
 
     size_t opDollar() const
     {
-        return data.length;
+        return len;
     }
 
     void opSliceAssign(T value)
     {
-        data[] = value;
+        mem[0 .. len] = value;
     }
 
     void opSliceAssign(T value, size_t a, size_t b)
     {
-        data[a .. b] = value;
+        mem[0 .. len][a .. b] = value;
     }
 
     void opSliceAssign(scope const(T)[] values, size_t a, size_t b)
     {
-        data[a .. b] = values[];
+        mem[0 .. len][a .. b] = values[];
     }
 
     // Make it at least `count` long, keep the elements. False if out of
     // memory, then it is unchanged.
     bool ensure(size_t count)
     {
-        if (data.length >= count)
+        if (len >= count)
             return true;
         return resize(count);
     }
 
-    // Make it `count` long, keep the elements that fit. False if out of
-    // memory, then it is unchanged.
+    // Make it `count` long, keep the elements that fit. The elements past
+    // the old length are unspecified, as with realloc. Only reallocates when
+    // the memory is too small. False if out of memory, then it is unchanged.
     bool resize(size_t count) @trusted
     {
-        if (count == 0)
+        if (count <= mem.length)
         {
-            release();
+            len = count;
             return true;
         }
-        T[] r = reallocArray(data, count);
+        T[] r = reallocArray(mem, count);
         if (r is null)
             return false;
-        data = r;
+        mem = r;
+        len = count;
         return true;
+    }
+
+    // Length 0, the memory is kept.
+    void clear()
+    {
+        len = 0;
     }
 
     void release() @trusted
     {
-        freeArray(data);
+        freeArray(mem);
+        len = 0;
     }
 
-    // Give the memory to the caller, who will free it with nu_free.
-    T[] take()
+    // Give the memory to the caller, who will free it with nu_free. Shrunk
+    // to the length if it can be.
+    T[] take() @trusted
     {
-        T[] r = data;
-        data = null;
+        if (len == 0)
+        {
+            release();
+            return null;
+        }
+        if (len < mem.length)
+        {
+            T[] r = reallocArray(mem, len);
+            if (r !is null)
+                mem = r;
+        }
+        T[] r = mem[0 .. len];
+        mem = null;
+        len = 0;
         return r;
     }
 }
