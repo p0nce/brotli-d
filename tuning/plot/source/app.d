@@ -4,13 +4,18 @@
     SVG.
 
     Usage: plot [--levels <min> <max>] [--iters <num>] [--out <file.svg>]
-                <encoder.exe> [<encoder.exe> ...]
+                [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]
 
     Each encoder runs as `<encoder.exe> <min> <max> [--iters <num>]`, one at a
     time (no parallel jobs: the machine heats), and its summary lines
     "level N   median X%   mean Y%   Z MB/s" are read from its output.
     Levels default to 1..11. The SVG goes to plot.svg next to this executable
     unless --out says otherwise. The numbers are printed as a table too.
+
+    --assume-same-speed: in the SVG, every encoder gets the same speed at a
+    level, the mean of their measured speeds, so that only the ratios differ
+    (for changes that don't touch speed, where 1 iteration is noise). The
+    table still shows the measured speeds.
 
     X axis: mean ratio (compressed / original, lower is better). Y axis:
     speed in MB/s, log scale. Better is up and left.
@@ -45,6 +50,7 @@ int main(string[] args)
 {
     int minLevel = 1, maxLevel = 11;
     string iters;
+    bool sameSpeed;
     string outPath = buildPath(dirName(thisExePath), "plot.svg");
     string[] exes;
     try
@@ -58,6 +64,8 @@ int main(string[] args)
                 minLevel = args[++i].to!int;
                 maxLevel = args[++i].to!int;
             }
+            else if (args[i] == "--assume-same-speed")
+                sameSpeed = true;
             else if (args[i] == "--iters")
             {
                 if (++i == args.length)
@@ -103,6 +111,8 @@ int main(string[] args)
     }
 
     printTable(series);
+    if (sameSpeed)
+        averageSpeeds(series);
     std.file.write(outPath, svg(series));
     writefln("wrote %s", outPath);
     return 0;
@@ -163,6 +173,23 @@ void printTable(Series[] series)
         }
         writeln();
     }
+}
+
+// --assume-same-speed: at each level, every encoder's speed becomes the mean
+// of the speeds measured at that level.
+void averageSpeeds(Series[] series)
+{
+    double[int] total;
+    int[int] count;
+    foreach (s; series)
+        foreach (p; s.points)
+        {
+            total[p.level] = total.get(p.level, 0.0) + p.speed;
+            count[p.level] = count.get(p.level, 0) + 1;
+        }
+    foreach (ref s; series)
+        foreach (ref p; s.points)
+            p.speed = total[p.level] / count[p.level];
 }
 
 // Categorical slots, light and dark steps, in fixed order.
@@ -292,6 +319,6 @@ string xmlEscape(string s)
 int usage()
 {
     stderr.writefln("Usage: plot [--levels <min> <max>] [--iters <num>] [--out <file.svg>]");
-    stderr.writefln("            <encoder.exe> [<encoder.exe> ...]");
+    stderr.writefln("            [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]");
     return 1;
 }
