@@ -2550,7 +2550,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuned enum INITIAL_COMMAND_COST_OFFSET = 10; // first pass: symbol i costs log2(this + i)
 @tuned enum INITIAL_DISTANCE_COST_OFFSET = 20;
 @tuned enum OPTIMAL_MATCH_STARTS = 2; // (optimal) starts tried with all the matches, the others only with short codes
-@tuning enum long START_MAX_COST_DIFF = 0; // command ends worse than literals don't start inserts
+@tuned enum long START_MAX_COST_DIFF = 0; // (doesn't change a lot) command ends worse than literals don't start inserts
 @tuning enum LONG_COPY_QUICK_STEP = 16384; // skip the parse inside copies at least that long
 // Literal costs after the first pass: weighted average of the costs with
 // and without contexts.
