@@ -2538,6 +2538,8 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 // every match length at a position, with the smallest distance found for it.
 @tuned enum TREE_BUCKET_BITS = 17;
 // The trees cover at most that much history: 8 bytes of memory per byte.
+
+// speed-related, didn't tune everything here
 @tuning enum MAX_TREE_WINDOW = 1 << 22; // Can only be tuned if test suite is in level 10-11, with files > 4mb, with large window sizes
 @tuning enum MAX_TREE_SEARCH_DEPTH = 64;
 @tuning enum MAX_TREE_COMP_LENGTH = 128;
@@ -2547,7 +2549,7 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuned enum MISSING_SYMBOL_EXTRA_BITS = 16; // cost of an absent symbol x8, above the rarest
 @tuned enum INITIAL_COMMAND_COST_OFFSET = 10; // first pass: symbol i costs log2(this + i)
 @tuned enum INITIAL_DISTANCE_COST_OFFSET = 20;
-@tuning enum OPTIMAL_MATCH_STARTS = 2; // starts tried with all the matches, the others only with short codes
+@tuned enum OPTIMAL_MATCH_STARTS = 2; // (optimal) starts tried with all the matches, the others only with short codes
 @tuning enum long START_MAX_COST_DIFF = 0; // command ends worse than literals don't start inserts
 @tuning enum LONG_COPY_QUICK_STEP = 16384; // skip the parse inside copies at least that long
 // Literal costs after the first pass: weighted average of the costs with
