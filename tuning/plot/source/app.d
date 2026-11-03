@@ -6,10 +6,13 @@
     Usage: plot [--levels <min> <max>] [--iters <num>] [--category <list>]
                 [--out <file.svg>] [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]
 
-    Each encoder runs as `<encoder.exe> <min> <max> [--iters <num>]
+    Each encoder runs as `<encoder.exe> <level> [--iters <num>]
     [--category=<list>]`, one at a time (no parallel jobs: the machine
-    heats), and its summary lines "level N   median X%   mean Y%   Z MB/s" are read
-    from its output.
+    heats), and its summary line "level N   median X%   mean Y%   Z MB/s" is
+    read from its output. At each level the encoders run ABBA: in order, then
+    in reverse order, so that the machine heating up slows them alike. An
+    encoder's speed at a level is the best of its two runs; --iters is per
+    run.
     Levels default to 1..11. The SVG goes to plot.svg next to this executable
     unless --out says otherwise. The numbers are printed as a table too.
 
@@ -38,6 +41,7 @@ import std.format;
 import std.math;
 import std.path;
 import std.process;
+import std.range;
 import std.stdio;
 import std.string;
 
@@ -106,29 +110,43 @@ int main(string[] args)
     if (exes.length == 0 || minLevel > maxLevel)
         return usage();
 
+    // ABBA: at each level, the encoders run in order, then in reverse order,
+    // so that a drift (the machine heating) slows them alike. An encoder's
+    // speed at a level is its best of its runs there.
     Series[] series;
     foreach (exe; exes)
+        series ~= Series(stripExtension(baseName(exe)));
+    size_t[] order = iota(exes.length).array ~ iota(exes.length).retro.array;
+    foreach (level; minLevel .. maxLevel + 1)
     {
-        string path = absolutePath(exe);
-        string[] cmd = [path, minLevel.to!string, maxLevel.to!string];
-        if (iters.length)
-            cmd ~= ["--iters", iters];
-        if (category.length)
-            cmd ~= "--category=" ~ category;
-        stderr.writefln("running %s", cmd.join(" "));
-        auto r = execute(cmd);
-        if (r.status != 0)
+        foreach (e; order)
         {
-            stderr.writefln("plot: %s failed (exit %d):\n%s", exe, r.status, r.output);
-            return 1;
+            string[] cmd = [absolutePath(exes[e]), level.to!string];
+            if (iters.length)
+                cmd ~= ["--iters", iters];
+            if (category.length)
+                cmd ~= "--category=" ~ category;
+            stderr.writefln("running %s", cmd.join(" "));
+            auto r = execute(cmd);
+            if (r.status != 0)
+            {
+                stderr.writefln("plot: %s failed (exit %d):\n%s", exes[e], r.status, r.output);
+                return 1;
+            }
+            Point[] points = parse(r.output);
+            if (points.length != 1 || points[0].level != level)
+            {
+                stderr.writefln("plot: no summary line for level %d in the output of %s:\n%s",
+                                level, exes[e], r.output);
+                return 1;
+            }
+            Point p = points[0];
+            Point[] mine = series[e].points; // shares its elements
+            if (mine.length && mine[$ - 1].level == level)
+                mine[$ - 1].speed = max(mine[$ - 1].speed, p.speed);
+            else
+                series[e].points ~= p;
         }
-        Series s = Series(stripExtension(baseName(exe)), parse(r.output));
-        if (s.points.length == 0)
-        {
-            stderr.writefln("plot: no summary lines in the output of %s:\n%s", exe, r.output);
-            return 1;
-        }
-        series ~= s;
     }
 
     printTable(series);
