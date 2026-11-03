@@ -2049,6 +2049,7 @@ enum uint COST_ONE_BIT = 1 << 16;
 enum uint COST_HALF_BIT = 1 << 15;
 enum uint COST_QUARTER_BIT = 1 << 14;
 enum uint COST_EIGHT_BIT = 1 << 13;
+enum uint COST_SIXTEENTH_BIT = 1 << 12;
 
 // log2(x) in fixed point with `fractionalBits` bits, truncated: by
 // repeated squaring of the mantissa. Slow, for checking the tables below.
@@ -2554,8 +2555,12 @@ uint clusterHistograms(scope const(uint)[] histograms, size_t n, size_t alphabet
 @tuning enum LONG_COPY_QUICK_STEP = 16384; // skip the parse inside copies at least that long
 // Literal costs after the first pass: weighted average of the costs with
 // and without contexts.
-@tuning enum uint LITERAL_CONTEXT_WEIGHT = 1;
-@tuning enum uint LITERAL_ORDER0_WEIGHT = 1;
+// 5/10 => l11 pire, l10mieux
+// 8/10 => unchanged
+// 9/10 => l11 pire, l10 bien mieux
+// 10/8 => worse
+@tuned enum uint LITERAL_CONTEXT_WEIGHT = 1;
+@tuned enum uint LITERAL_ORDER0_WEIGHT = 1;
 enum uint TREE_INVALID = uint.max;
 
 struct TreeHasher
@@ -3444,7 +3449,9 @@ struct SplitParams
     bool clusterBlocks;         // cluster each block on its own, not the histograms (slower)
 }
 
-@tuning enum ABSENT_SYMBOL_EXTRA_BITS = 8; // cost of a symbol absent from a histogram x8, above log2(total)
+
+@tuned enum ABSENT_SYMBOL_EXTRA_BITS = 16; // (optimal) cost of a symbol absent from a histogram x16, above log2(total)
+
 // Switches are cheaper at the beginning, where histograms are less reliable:
 // from START% of the switch cost, + SLOPE% each WARMUP symbols, until WARMUP.
 @tuning enum SPLIT_WARMUP = 2000;
@@ -3609,7 +3616,7 @@ void findBlocks(scope const(ushort)[] symbols, size_t alphabetSize, scope const(
             total += c;
         uint log2Total = log2Fixed(cast(size_t) total);
         foreach (s, c; h)
-            insertCost[s * stride + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_EIGHT_BIT
+            insertCost[s * stride + k] = c == 0 ? log2Total + ABSENT_SYMBOL_EXTRA_BITS * COST_SIXTEENTH_BIT
                                                  : log2Total - log2Fixed(c);
     }
     foreach (s; 0 .. alphabetSize)

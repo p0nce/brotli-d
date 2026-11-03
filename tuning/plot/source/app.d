@@ -24,13 +24,15 @@
     table still shows the measured speeds.
 
     X axis: mean ratio (compressed / original, lower is better). Y axis:
-    speed in MB/s, log scale. Better is up and left.
+    speed in MB/s, log scale. Better is up and left. The time of the run is
+    shown top right, so that browsers don't show a cached older plot.
 */
 module app;
 
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.datetime;
 import std.file;
 import std.format;
 import std.math;
@@ -256,6 +258,10 @@ string svg(Series[] series, string category)
     o ~= format(`<text class="ink" x="%d" y="28" font-size="18" font-weight="600">Speed vs mean ratio, levels %d to %d%s</text>`,
                 L, series[0].points[0].level, series[0].points[$ - 1].level,
                 category.length ? xmlEscape(", category " ~ category) : "") ~ "\n";
+    // Time of the run: each SVG differs, so browsers don't show a cached one.
+    SysTime now = Clock.currTime;
+    o ~= format(`<text class="ink2" x="%d" y="28" font-size="12" text-anchor="end">%04d-%02d-%02d %02d:%02d:%02d</text>`,
+                W - R, now.year, cast(int) now.month, now.day, now.hour, now.minute, now.second) ~ "\n";
 
     // Legend, one row above the plot.
     double lx = L;
