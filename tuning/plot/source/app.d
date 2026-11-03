@@ -3,16 +3,20 @@
     plots their speed against their mean ratio, one point per level, in an
     SVG.
 
-    Usage: plot [--levels <min> <max>] [--iters <num>] [--category <list>]
+    Usage: plot [--levels <min> <max>] [--speed] [--category <list>]
                 [--out <file.svg>] [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]
 
-    Each encoder runs as `<encoder.exe> <level> [--iters <num>]
+    Each encoder runs as `<encoder.exe> <level> --iters <num>
     [--category=<list>]`, one at a time (no parallel jobs: the machine
     heats), and its summary line "level N   median X%   mean Y%   Z MB/s" is
     read from its output. At each level the encoders run ABBA: in order, then
     in reverse order, so that the machine heating up slows them alike. An
-    encoder's speed at a level is the best of its two runs; --iters is per
-    run.
+    encoder's speed at a level is the best of its two runs.
+
+    --speed: more iterations per run where an encode is short, so that speeds
+    can be compared: 30 at levels 0 to 2, 10 at 3 to 9, 3 at 10 and 11.
+    Without it, 1 iteration (for ratios only).
+
     Levels default to 1..11. The SVG goes to plot.svg next to this executable
     unless --out says otherwise. The numbers are printed as a table too.
 
@@ -61,7 +65,7 @@ struct Series
 int main(string[] args)
 {
     int minLevel = 1, maxLevel = 11;
-    string iters;
+    bool speed;
     string category; // --category, passed to the encoders; empty: their default (all)
     bool sameSpeed;
     string outPath = buildPath(dirName(thisExePath), "plot.svg");
@@ -79,12 +83,8 @@ int main(string[] args)
             }
             else if (args[i] == "--assume-same-speed")
                 sameSpeed = true;
-            else if (args[i] == "--iters")
-            {
-                if (++i == args.length)
-                    return usage();
-                iters = args[i];
-            }
+            else if (args[i] == "--speed")
+                speed = true;
             else if (args[i] == "--category" || args[i] == "-category")
             {
                 if (++i == args.length)
@@ -122,8 +122,7 @@ int main(string[] args)
         foreach (e; order)
         {
             string[] cmd = [absolutePath(exes[e]), level.to!string];
-            if (iters.length)
-                cmd ~= ["--iters", iters];
+            cmd ~= ["--iters", (speed ? itersForSpeed(level) : 1).to!string];
             if (category.length)
                 cmd ~= "--category=" ~ category;
             stderr.writefln("running %s", cmd.join(" "));
@@ -360,9 +359,19 @@ string xmlEscape(string s)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
 }
 
+// --speed: iterations per run at `level`; fast levels need more.
+int itersForSpeed(int level)
+{
+    if (level <= 2)
+        return 30;
+    if (level <= 9)
+        return 10;
+    return 3;
+}
+
 int usage()
 {
-    stderr.writefln("Usage: plot [--levels <min> <max>] [--iters <num>] [--category <list>] [--out <file.svg>]");
+    stderr.writefln("Usage: plot [--levels <min> <max>] [--speed] [--category <list>] [--out <file.svg>]");
     stderr.writefln("            [--assume-same-speed] <encoder.exe> [<encoder.exe> ...]");
     return 1;
 }
