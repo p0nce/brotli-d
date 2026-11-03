@@ -1604,9 +1604,9 @@ size_t matchLength(scope const(ubyte)[] data, size_t a, size_t b, size_t limit) 
 
 // Heuristic match scores, in 1/135 of literal bytes (same as the reference encoder).
 @tuning enum LITERAL_BYTE_SCORE = 135;
-@tuning enum DISTANCE_BIT_PENALTY = 30;
+@tuned enum DISTANCE_BIT_PENALTY = 30; // doesn't move the needle much
 enum SCORE_BASE = DISTANCE_BIT_PENALTY * 8 * 8;
-@tuning enum MIN_SCORE_MARGIN = 100;   // a match must score more than SCORE_BASE + this
+@tuned enum MIN_SCORE_MARGIN = 100;   // a match must score more than SCORE_BASE + this
 enum MIN_SCORE = SCORE_BASE + MIN_SCORE_MARGIN;
 @tuning enum LAST_DISTANCE_BONUS = 15;
 @tuning enum SHORT_CODE_PENALTY = 39;  // plus 0 to 14, depending on the short code
