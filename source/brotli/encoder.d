@@ -1610,9 +1610,7 @@ enum SCORE_BASE = DISTANCE_BIT_PENALTY * 8 * 8;
 enum MIN_SCORE = SCORE_BASE + MIN_SCORE_MARGIN;
 @tuning enum LAST_DISTANCE_BONUS = 15;
 @tuning enum SHORT_CODE_PENALTY = 39;  // plus 0 to 14, depending on the short code
-
-@tuning enum LAZY_MATCH_MARGIN = 150;  // a match one byte later must score that much more
-
+@tuned enum LAZY_MATCH_MARGIN = 150;  // a match one byte later must score that much more (stopped iterating on that)
 @tuning enum DICTIONARY_THROTTLE_SHIFT = 7; // stop looking up the dictionary below 1 hit in 2^this lookups
 
 // Incompressible data: after a while without matches, look for matches
