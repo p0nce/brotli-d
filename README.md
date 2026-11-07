@@ -1,6 +1,6 @@
 # brotli
 
-Self-contained [Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder/encoder in the D programming language.
+[Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder/encoder in the D programming language.
 
 - **WARNING** Very much vibe-coded code (Opus 5.5). A few constants were hand-tuned to improve efficiency a bit.
 - `@safe pure nothrow @nogc`, D source. However **memory-safety is not guaranteed, only agents checked that `@safe` is respected.**
