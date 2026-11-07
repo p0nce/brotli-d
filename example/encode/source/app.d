@@ -11,9 +11,9 @@
 */
 module app;
 
-import std.datetime.stopwatch : StopWatch, AutoStart;
-import std.file : read, write;
-import std.stdio : stderr, writefln;
+import std.datetime.stopwatch;
+import std.file;
+import std.stdio;
 
 import brotli;
 

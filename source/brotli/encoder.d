@@ -51,7 +51,7 @@ import brotli.decoder;
 /// super slow.
 enum BROTLI_MIN_LEVEL = 0;
 enum BROTLI_MAX_LEVEL = 11;     /// ditto
-enum BROTLI_DEFAULT_LEVEL = 6;  /// ditto
+enum BROTLI_DEFAULT_LEVEL = 4;  /// ditto
 
 /// Window sizes: the decoder needs (1 << windowBits) bytes of history.
 /// The encoder uses less than asked when the input is smaller.

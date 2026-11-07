@@ -2,51 +2,52 @@
 
 Self-contained [Brotli](https://www.rfc-editor.org/rfc/rfc7932) decoder/encoder in the D programming language.
 
-- **WARNING** Very much vibe-coded code (Opus 5.5).
-- `@safe pure nothrow @nogc`, D source.
-- One-shot decoding, memory to memory.
-- Translation of Google's reference decoder (MIT), but non-streaming decoder.
-- 
+- **WARNING** Very much vibe-coded code (Opus 5.5). A few constants were hand-tuned to improve efficiency a bit.
+- `@safe pure nothrow @nogc`, D source. However **memory-safety is not guaranteed, only agents checked that `@safe` is respected.**
+- Decoder is a translation of Google's reference decoder (MIT), but non-streaming.
+- Encoder largly inspired from Google's reference too.
 
 
 ## Usage
 
 ```d
-import brotli;
 
-// Decode into your own buffer.
-ubyte[4096] buf;
-size_t len;
-BrotliStatus s = brotliDecompress(compressed, buf[], len);
-if (s == BrotliStatus.success)
-    use(buf[0..len]);
+//
+// DECODING API
+//
 
-// Decode into a malloc'ed buffer, with an optional size limit.
-ubyte[] decoded;
-if (brotliDecompressAlloc(compressed, decoded, 100_000_000) == BrotliStatus.success)
-{
-    use(decoded);
-    () @trusted { brotliFree(decoded); }();
-}
+// Decompress a complete Brotli stream into a caller-provided buffer.
+BrotliStatus brotliDecompress(const(ubyte)[] input, ubyte[] output, out size_t decodedSize);
 
-// Decode many streams with one BrotliDecoder: it keeps its tables and its
-// output buffer, so once grown to the largest output it allocates nothing.
-// The other two functions also take a BrotliDecoder as first argument.
-BrotliDecoder dec;
-foreach (stream; streams)
-{
-    const(ubyte)[] data;
-    if (brotliDecompressOwned(dec, stream, data) == BrotliStatus.success)
-        use(data); // valid until the next call with `dec`
-}
+// Decompress a complete Brotli stream into a newly allocated buffer.
+BrotliStatus brotliDecompressAlloc(const(ubyte)[] input, out ubyte[] output);
+
+// Decompress a complete Brotli stream into a buffer owned by `decoder`.
+BrotliStatus brotliDecompressOwned(ref BrotliDecoder decoder, const(ubyte)[] input, out const(ubyte)[] output);
+
+
+//
+// ENCODING API
+//
+
+// Compress `input` into a caller-provided buffer. Use a new encoder each time.
+BrotliStatus brotliCompress(const(ubyte)[] input, ubyte[] output, out size_t encodedSize,
+                            int level = BROTLI_DEFAULT_LEVEL);
+
+// Compress `input` into a caller-provided buffer, reusing an encoder.
+BrotliStatus brotliCompress(ref BrotliEncoder encoder, const(ubyte)[] input, ubyte[] output,
+                            out size_t encodedSize,
+                            int level = BROTLI_DEFAULT_LEVEL);
+
+// Compress `input` into a newly allocated buffer, reusing an encoder.
+BrotliStatus brotliCompressAlloc(ref BrotliEncoder encoder, const(ubyte)[] input,
+                                 out ubyte[] output,
+                                 int level = BROTLI_DEFAULT_LEVEL)
+
+// Maximum compressed size of an input for any level and window.
+size_t brotliCompressBound(size_t inputLength);
 ```
 
-`BrotliStatus` is either:
-- `BrotliStatus.success`, 
-- `BrotliStatus.corrupted` (invalid, truncated, or followed
-by trailing bytes), 
-- `BrotliStatus.outputTooSmall` (give larger buffer), 
-- `BrotliStatus.outOfMemory`.
 
 ## Limitations
 
@@ -54,16 +55,6 @@ by trailing bytes),
 - Large-window Brotli (non-RFC extension) and shared dictionaries are not supported.
 
 
-## Testing
-
-```
-dmd -of=tester -I<numem>/source -Isource test/tester.d source/brotli/*.d <numem>/source/numem/core/hooks.d
-./tester check test/suite.bin test/suite.txt
-```
-
-`test/suite.*` holds ~18000 streams (valid and corrupted) with the reference
-decoder's results. `test/make_suite.py`, `test/compare.py` and `test/bench.py`
-regenerate it, fuzz, and benchmark against the reference (`pip install brotli`).
 
 ## License
 

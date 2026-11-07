@@ -1,0 +1,15 @@
+{
+    "name": "brotli-woff2-optimize-example",
+    "description": "Example: recompress the Brotli streams of a WOFF2 font with the brotli library.",
+    "license": "MIT",
+    "targetType": "executable",
+    "targetName": "woff2-optimize",
+    "sourcePaths": [
+        "source"
+    ],
+    "dependencies": {
+        "brotli": {
+            "path": "../.."
+        }
+    }
+}

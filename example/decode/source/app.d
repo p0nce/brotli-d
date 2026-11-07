@@ -35,7 +35,7 @@ int main(string[] args)
         stderr.writefln("brotli-decode: decompression failed (%s)", status);
         return 1;
     }
-    scope (exit) () @trusted { brotliFree(output); }();
+    scope(exit) brotliFree(output);
 
     write(args[2], output);
     writefln("%s: %d -> %d bytes, %d µs", args[1], input.length, output.length, us);

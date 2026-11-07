@@ -1256,7 +1256,7 @@ BrotliStatus readTableGroup(ref BitReader br, uint alphabetSize, uint count,
 }
 
 BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref Workspace ws,
-                                       ref StreamState st, size_t metaBlockLength)
+                                       ref StreamState st, size_t metaBlockLength) @trusted
 {
     enum corrupted = BrotliStatus.corrupted;
     enum oom = BrotliStatus.outOfMemory;
