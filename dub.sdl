@@ -1,6 +1,6 @@
 name "brotli"
 description "Self-contained D Brotli decoder/encoder. @safe pure nothrow @nogc. Translation of the reference decoder, and new decoder."
-authors "Claude" "Guillaume Piolat" "The Brotli Authors"
+authors "Claude" "The Brotli Authors"
 copyright "Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors, (c) 2026 Guillaume Piolat"
 license "MIT"
 dependency "intel-intrinsics" version="~>1.14"

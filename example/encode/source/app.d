@@ -12,7 +12,7 @@
 module app;
 
 import std.datetime.stopwatch;
-import std.file;
+static import std.file;
 import std.stdio;
 
 import brotli;
@@ -25,7 +25,7 @@ int main(string[] args)
         return 1;
     }
 
-    const(ubyte)[] input = cast(const(ubyte)[]) read(args[1]);
+    const(ubyte)[] input = cast(const(ubyte)[]) std.file.read(args[1]);
 
     enum windowBits = BROTLI_DEFAULT_WINDOW_BITS;
     writefln("%s: %d bytes, window %d", args[1], input.length, windowBits);
@@ -72,7 +72,7 @@ int main(string[] args)
     double bestRatio = input.length ? 100.0 * best.length / input.length : 0.0;
     writefln("best: level %d, %d bytes, %.2f%%, %.1f ms", bestLevel, best.length, bestRatio, bestMs);
 
-    write(args[2], best);
+    std.file.write(args[2], best);
     writefln("wrote %s", args[2]);
     return 0;
 }
