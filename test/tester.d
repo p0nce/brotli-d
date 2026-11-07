@@ -19,6 +19,11 @@ Test driver for the brotli decoder and encoder.
     tester encchunks <in> <level> <windowBits> <iterations>
         Same for each record of <in> (same format as batch), compressed on
         its own: prints "<total compressed size> <MB/s over all records>".
+
+    tester decmodes chunks|file <in> <level> <iterations>
+        Compresses each record of <in> ("chunks", same format as batch) or
+        the whole file ("file") at <level>, then prints the decoding MB/s of
+        each API, with a new BrotliDecoder per call or a reused one.
 */
 import std.stdio, std.file, std.conv, std.format, std.datetime.stopwatch;
 import brotli;
@@ -216,6 +221,76 @@ int main(string[] args)
                 best = speed;
         }
         writefln("%s %.2f", total, best);
+        return 0;
+    }
+    if (args.length >= 6 && args[1] == "decmodes")
+    {
+        // Decoding speed of each record of <in> ("chunks", batch format) or
+        // of the whole file ("file"), compressed at <level>, with each API,
+        // with a new decoder per call or a reused one. Modes alternate in each
+        // iteration; best MB/s of the iterations per mode.
+        auto data = cast(ubyte[]) read(args[3]);
+        int level = to!int(args[4]);
+        int iters = to!int(args[5]);
+        ubyte[][] chunks;
+        if (args[2] == "file")
+            chunks ~= data;
+        else
+        {
+            size_t p = 0;
+            while (p < data.length)
+            {
+                uint n = data[p] | (data[p + 1] << 8) | (data[p + 2] << 16) | (data[p + 3] << 24);
+                p += 4;
+                chunks ~= data[p .. p + n];
+                p += n;
+            }
+        }
+        ubyte[][] streams;
+        size_t inputLength = 0, maxLength = 0;
+        foreach (chunk; chunks)
+        {
+            streams ~= compressAndCheck(chunk, level, 24);
+            inputLength += chunk.length;
+            if (chunk.length > maxLength)
+                maxLength = chunk.length;
+        }
+        ubyte[] buf = new ubyte[maxLength];
+        BrotliDecoder dec;
+        enum string[6] names = ["buf new", "buf reused", "alloc new", "alloc reused",
+                                "owned new", "owned reused"];
+        double[6] best = 0;
+        foreach (it; 0 .. iters)
+        {
+            foreach (m; 0 .. 6)
+            {
+                auto sw = StopWatch(AutoStart.yes);
+                foreach (s; streams)
+                {
+                    BrotliStatus r;
+                    size_t len;
+                    ubyte[] alloc;
+                    const(ubyte)[] owned;
+                    final switch (m)
+                    {
+                        case 0: r = brotliDecompress(s, buf, len); break;
+                        case 1: r = brotliDecompress(dec, s, buf, len); break;
+                        case 2: r = brotliDecompressAlloc(s, alloc); brotliFree(alloc); break;
+                        case 3: r = brotliDecompressAlloc(dec, s, alloc); brotliFree(alloc); break;
+                        case 4: { BrotliDecoder once; r = brotliDecompressOwned(once, s, owned); } break;
+                        case 5: r = brotliDecompressOwned(dec, s, owned); break;
+                    }
+                    if (r != BrotliStatus.success)
+                        return 1;
+                }
+                double secs = sw.peek.total!"hnsecs" / 1e7;
+                double speed = secs > 0 ? inputLength / secs / 1e6 : 0;
+                if (speed > best[m])
+                    best[m] = speed;
+            }
+        }
+        foreach (m; 0 .. 6)
+            writefln("%-13s %8.1f MB/s", names[m], best[m]);
         return 0;
     }
     if (args.length >= 4 && args[1] == "batch")
