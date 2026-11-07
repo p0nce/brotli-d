@@ -33,6 +33,16 @@ if (brotliDecompressAlloc(compressed, decoded) == BrotliStatus.success)
     use(decoded);
     brotliFree(decoded); // @system
 }
+
+// 3. Decode many streams into a buffer the decoder keeps: no allocation once
+//    it has grown to the largest output.
+BrotliDecoder dec;
+foreach (stream; streams)
+{
+    const(ubyte)[] data;
+    if (brotliDecompressOwned(dec, stream, data) == BrotliStatus.success)
+        use(data); // valid until the next call with `dec`
+}
 ---
 */
 module brotli.decoder;
@@ -54,6 +64,51 @@ enum BrotliStatus
 }
 
 /**
+    Decoder state that is kept from one call to the next: the prefix code
+    tables, the context maps, and the output buffer of `brotliDecompressOwned`.
+    Reusing one `BrotliDecoder` for many inputs saves allocating them again;
+    the output is the same as with a new decoder. It holds its memory until
+    destroyed or `release`d, sized for the largest stream it has decoded.
+
+    It can't be copied: pass it by `ref`. One decoder must not be used by two
+    threads at the same time.
+
+    Example:
+    ---
+    BrotliDecoder dec;
+    foreach (compressed; manyStreams)
+    {
+        const(ubyte)[] decoded;
+        if (brotliDecompressOwned(dec, compressed, decoded) == BrotliStatus.success)
+            use(decoded); // valid until the next call with `dec`
+    }
+    ---
+*/
+struct BrotliDecoder
+{
+pure nothrow @nogc @safe:
+    @disable this(this);
+
+    ~this()
+    {
+        release();
+    }
+
+    /// Frees the memory now. The decoder can still be used afterwards.
+    void release()
+    {
+        ws.release();
+        o.owned.release();
+        o.buf = null;
+        o.len = 0;
+    }
+
+private:
+    Workspace ws;
+    OutputBuffer o; // growable, for brotliDecompressOwned
+}
+
+/**
     Decompress a complete Brotli stream into a caller-provided buffer.
 
     Params:
@@ -65,11 +120,19 @@ enum BrotliStatus
 */
 BrotliStatus brotliDecompress(const(ubyte)[] input, ubyte[] output, out size_t decodedSize)
 {
+    BrotliDecoder decoder;
+    return brotliDecompress(decoder, input, output, decodedSize);
+}
+
+/// Same, reusing `decoder`'s memory (see `BrotliDecoder`).
+BrotliStatus brotliDecompress(ref BrotliDecoder decoder, const(ubyte)[] input,
+                              ubyte[] output, out size_t decodedSize)
+{
     OutputBuffer o;
     o.buf = output;
     o.limit = output.length;
     o.growable = false;
-    BrotliStatus r = decodeStream(input, o);
+    BrotliStatus r = decodeStream(input, o, decoder.ws);
     if (r == BrotliStatus.success)
         decodedSize = o.len;
     return r;
@@ -90,15 +153,62 @@ BrotliStatus brotliDecompress(const(ubyte)[] input, ubyte[] output, out size_t d
 BrotliStatus brotliDecompressAlloc(const(ubyte)[] input, out ubyte[] output,
                                    size_t maxOutputSize = size_t.max)
 {
+    BrotliDecoder decoder;
+    return brotliDecompressAlloc(decoder, input, output, maxOutputSize);
+}
+
+/// Same, reusing `decoder`'s memory (see `BrotliDecoder`). The output buffer
+/// is new each time: it becomes the caller's.
+BrotliStatus brotliDecompressAlloc(ref BrotliDecoder decoder, const(ubyte)[] input,
+                                   out ubyte[] output, size_t maxOutputSize = size_t.max)
+{
     OutputBuffer o;
     o.limit = maxOutputSize;
     o.growable = true;
-    BrotliStatus r = decodeStream(input, o);
+    BrotliStatus r = decodeStream(input, o, decoder.ws);
     if (r != BrotliStatus.success || o.len == 0)
         return r;
     // Shrink to fit. If that fails, the larger buffer is still fine.
     o.owned.resize(o.len);
     output = o.owned.take()[0 .. o.len];
+    return r;
+}
+
+/**
+    Decompress a complete Brotli stream into a buffer owned by `decoder`,
+    which keeps its capacity for the next calls: once it is large enough,
+    decoding allocates nothing.
+
+    Params:
+        decoder       = State to reuse (see `BrotliDecoder`).
+        input         = The whole compressed stream. Trailing bytes are an error.
+        output        = On success, the decoded data. It points into `decoder`
+                        and is valid until the next call with `decoder`, or
+                        its `release` or destruction. Empty on error.
+        maxOutputSize = Decoding fails with `BrotliStatus.outputTooSmall` if
+                        the decoded data would be larger than this.
+
+    Returns: `BrotliStatus.success`, or the error that occured.
+*/
+BrotliStatus brotliDecompressOwned(ref BrotliDecoder decoder, const(ubyte)[] input,
+                                   out const(ubyte)[] output,
+                                   size_t maxOutputSize = size_t.max) @trusted
+{
+    // @trusted: `output` escapes `decoder`'s memory, as documented.
+    OutputBuffer* o = &decoder.o;
+    o.limit = maxOutputSize;
+    o.growable = true;
+    o.len = 0;
+    o.error = BrotliStatus.success;
+    // The whole memory kept, but no more than the limit (reserve() trusts
+    // buf.length).
+    size_t cap = o.owned.length;
+    if (cap > maxOutputSize)
+        cap = maxOutputSize;
+    o.buf = o.owned[0 .. cap];
+    BrotliStatus r = decodeStream(input, *o, decoder.ws);
+    if (r == BrotliStatus.success)
+        output = o.buf[0 .. o.len];
     return r;
 }
 
@@ -1082,14 +1192,25 @@ bool readBlockSwitch(ref BitReader br, ref BlockCategory cat)
     return true;
 }
 
-// Memory reused across meta-blocks.
+// Memory reused across meta-blocks, and across streams by a BrotliDecoder.
+// Its content doesn't carry over: each meta-block writes what it reads.
 struct Workspace
 {
+pure nothrow @nogc @safe:
     MallocArray!uint literalTables;
     MallocArray!uint commandTables;
     MallocArray!uint distanceTables;
     MallocArray!ubyte literalContextMap;
     MallocArray!ubyte distanceContextMap;
+
+    void release()
+    {
+        literalTables.release();
+        commandTables.release();
+        distanceTables.release();
+        literalContextMap.release();
+        distanceContextMap.release();
+    }
 }
 
 // State kept across meta-blocks.
@@ -1387,14 +1508,12 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
     return BrotliStatus.success;
 }
 
-BrotliStatus decodeStream(const(ubyte)[] input, ref OutputBuffer o)
+BrotliStatus decodeStream(const(ubyte)[] input, ref OutputBuffer o, ref Workspace ws)
 {
     enum corrupted = BrotliStatus.corrupted;
 
     BitReader br;
     br.data = input;
-
-    Workspace ws;
 
     // Stream header: window size.
     uint windowBits;
@@ -1540,6 +1659,74 @@ unittest
     static immutable ubyte[] empty = [0x06];
     assert(brotliDecompress(empty, buf[], len) == BrotliStatus.success);
     assert(len == 0);
+}
+
+unittest
+{
+    // A reused BrotliDecoder gives the same result as a new one, in the three
+    // ways to decode: sizes going up then down, errors in between, a limit
+    // below the kept capacity, after release too.
+    import brotli.encoder : brotliCompress, brotliCompressBound;
+
+    MallocArray!ubyte input;
+    assert(input.resize(300_000));
+    ulong state = 0x9E3779B97F4A7C15UL;
+    foreach (i; 0 .. input.length)
+    {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        ulong r = state * 0x2545F4914F6CDD1DUL;
+        input[i] = (i > 64 && (r & 3) != 0) ? input[i - 1 - cast(size_t)((r >> 8) & 63)]
+                                            : cast(ubyte)('a' + (r >> 32) % 26);
+    }
+    static immutable size_t[6] sizes = [300_000, 100, 70_000, 1, 5_000, 300_000];
+    static immutable int[6] levels = [5, 11, 1, 9, 0, 3];
+
+    MallocArray!ubyte compressed, buf;
+    assert(compressed.resize(brotliCompressBound(300_000)) && buf.resize(300_000));
+    BrotliDecoder dec;
+    foreach (pass; 0 .. 2)
+    {
+        foreach (k, size; sizes)
+        {
+            const(ubyte)[] data = input[0 .. size];
+            size_t clen, len;
+            assert(brotliCompress(data, compressed[], clen, levels[k]) == BrotliStatus.success);
+            const(ubyte)[] stream = compressed[0 .. clen];
+
+            // Into the caller's buffer.
+            assert(brotliDecompress(dec, stream, buf[], len) == BrotliStatus.success);
+            assert(buf[0 .. len] == data);
+
+            // Into a new buffer.
+            ubyte[] alloc;
+            assert(brotliDecompressAlloc(dec, stream, alloc) == BrotliStatus.success);
+            assert(alloc == data);
+            () @trusted { brotliFree(alloc); }();
+
+            // Into the decoder's buffer, kept from the larger streams before:
+            // the limit still holds.
+            const(ubyte)[] owned;
+            if (size > 1)
+            {
+                assert(brotliDecompressOwned(dec, stream, owned, size - 1) == BrotliStatus.outputTooSmall);
+                assert(owned.length == 0);
+            }
+            assert(brotliDecompressOwned(dec, stream[0 .. $ - 1], owned) == BrotliStatus.corrupted);
+            assert(brotliDecompressOwned(dec, stream, owned, size) == BrotliStatus.success);
+            assert(owned == data);
+            assert(brotliDecompressOwned(dec, stream, owned) == BrotliStatus.success);
+            assert(owned == data);
+        }
+        dec.release();
+    }
+
+    // Empty stream.
+    const(ubyte)[] owned;
+    static immutable ubyte[] empty = [0x06];
+    assert(brotliDecompressOwned(dec, empty, owned) == BrotliStatus.success);
+    assert(owned.length == 0);
 }
 
 // ---------------------------------------------------------------------------

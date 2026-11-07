@@ -28,6 +28,17 @@ if (brotliDecompressAlloc(compressed, decoded, 100_000_000) == BrotliStatus.succ
     use(decoded);
     () @trusted { brotliFree(decoded); }();
 }
+
+// Decode many streams with one BrotliDecoder: it keeps its tables and its
+// output buffer, so once grown to the largest output it allocates nothing.
+// The other two functions also take a BrotliDecoder as first argument.
+BrotliDecoder dec;
+foreach (stream; streams)
+{
+    const(ubyte)[] data;
+    if (brotliDecompressOwned(dec, stream, data) == BrotliStatus.success)
+        use(data); // valid until the next call with `dec`
+}
 ```
 
 `BrotliStatus` is either:
