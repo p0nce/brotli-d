@@ -5,7 +5,7 @@
 - **WARNING** Very much vibe-coded code (Opus 5.5). A few constants were hand-tuned to improve efficiency a bit.
 - `@safe pure nothrow @nogc`, D source. However **memory-safety is not guaranteed, only agents checked that `@safe` is respected.**
 - Decoder is a translation of Google's reference decoder (MIT), but non-streaming.
-- Encoder largly inspired from Google's reference too.
+- Encoder largly inspired from Google's reference too. However it's retuned by hand typically winning from 0.1 to 0.5% on size.
 
 
 ## Usage
