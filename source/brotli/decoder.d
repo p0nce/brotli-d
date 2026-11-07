@@ -634,7 +634,7 @@ uint nextTableBitSize(ref const(int)[16] count, uint len)
 void buildHuffmanTable(scope uint[] table, scope const(ubyte)[] lengths)
 {
     assert(table.length >= maxHuffmanTableSize(cast(uint) lengths.length));
-    ushort[MAX_ALPHABET_SIZE] sorted; // symbols sorted by code length
+    ushort[MAX_ALPHABET_SIZE] sorted = void; // symbols sorted by code length; [0, n) written, n = nonzero lengths
     int[16] count;  // number of codes of each length
     int[16] offset; // offsets in sorted table for each length
 
@@ -753,13 +753,15 @@ package bool readPrefixCode(ref BitReader br, uint alphabetSize, scope uint[] ta
     assert(alphabetSize >= 2 && alphabetSize <= MAX_ALPHABET_SIZE);
     assert(table.length >= maxHuffmanTableSize(alphabetSize));
 
-    ubyte[MAX_ALPHABET_SIZE] lengthsStorage = 0;
+    // Zeroed only where not written below.
+    ubyte[MAX_ALPHABET_SIZE] lengthsStorage = void;
     ubyte[] lengths = lengthsStorage[0 .. alphabetSize];
 
     uint hskip = br.readBits(2);
     if (hskip == 1)
     {
         // Simple prefix code.
+        lengths[] = 0;
         uint nbits = 0;
         for (uint x = alphabetSize - 1; x != 0; x >>= 1)
             ++nbits;
@@ -827,7 +829,8 @@ package bool readPrefixCode(ref BitReader br, uint alphabetSize, scope uint[] ta
         if (space != 0 && numCodes != 1)
             return false;
 
-        uint[kMaxHuffmanTableSize[(18 + 31) >> 5]] clTable;
+        // Lengths <= 5: only the root table is read, always filled.
+        uint[kMaxHuffmanTableSize[(18 + 31) >> 5]] clTable = void;
         buildHuffmanTable(clTable[], clLengths[]);
 
         // Then the symbol code lengths.
@@ -876,6 +879,7 @@ package bool readPrefixCode(ref BitReader br, uint alphabetSize, scope uint[] ta
         }
         if (space != 0)
             return false;
+        lengths[symbol .. $] = 0;
     }
     buildHuffmanTable(table, lengths);
     return true;
@@ -887,7 +891,7 @@ package bool readPrefixCode(ref BitReader br, uint alphabetSize, scope uint[] ta
 
 void inverseMoveToFront(scope ubyte[] v)
 {
-    ubyte[256] mtf;
+    ubyte[256] mtf = void;
     foreach (i; 0 .. 256)
         mtf[i] = cast(ubyte) i;
     foreach (ref x; v)
@@ -913,7 +917,7 @@ package bool decodeContextMap(ref BitReader br, scope ubyte[] map, out uint numT
     if (br.readBits(1) != 0)
         maxRunLengthPrefix = br.readBits(4) + 1;
     uint alphabetSize = numTrees + maxRunLengthPrefix;
-    uint[kMaxHuffmanTableSize[(256 + 16 + 31) >> 5]] tableStorage;
+    uint[kMaxHuffmanTableSize[(256 + 16 + 31) >> 5]] tableStorage = void; // filled by readPrefixCode
     uint[] table = tableStorage[0 .. maxHuffmanTableSize(alphabetSize)];
     if (!readPrefixCode(br, alphabetSize, table))
         return false;
@@ -1258,7 +1262,8 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
     enum oom = BrotliStatus.outOfMemory;
 
     // Block types and counts: 0 = literals, 1 = commands, 2 = distances.
-    BlockCategory[3] cats;
+    // Every field set below; the tables only when used (numTypes >= 2).
+    BlockCategory[3] cats = void;
     foreach (ref cat; cats)
     {
         cat.numTypes = readVarLenUint8(br) + 1;
@@ -1278,7 +1283,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
     uint npostfix = br.readBits(2);
     uint ndirect = br.readBits(4) << npostfix;
 
-    ubyte[256] contextModes;
+    ubyte[256] contextModes = void; // [0, numTypes) written
     foreach (i; 0 .. cats[0].numTypes)
         contextModes[i] = cast(ubyte) br.readBits(2);
 
@@ -1314,7 +1319,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
         return corrupted;
 
     // For each literal block type: is the same prefix code used in every context?
-    bool[256] trivialLiteralContext;
+    bool[256] trivialLiteralContext = void; // [0, numTypes) written
     foreach (t; 0 .. cats[0].numTypes)
     {
         trivialLiteralContext[t] = true;
@@ -1462,7 +1467,7 @@ BrotliStatus decodeCompressedMetaBlock(ref BitReader br, ref OutputBuffer o, ref
             size_t wordOffset = kDictionaryOffsets[copyLength] + cast(size_t)(wordIndex * copyLength);
             const(ubyte)[] word = dict[wordOffset .. wordOffset + copyLength];
 
-            ubyte[MAX_TRANSFORMED_WORD_LENGTH] transformed;
+            ubyte[MAX_TRANSFORMED_WORD_LENGTH] transformed = void; // [0, len) written
             size_t len = transformWord(transformed[], word, kTransforms[cast(size_t) transformIndex]);
             if (len > remaining)
                 return corrupted;
